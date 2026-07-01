@@ -1,0 +1,74 @@
+{
+  "pandadata": {
+    "base_url": "http://pandadata.pandaaiquant.com",
+    "username": "",
+    "password": ""
+  },
+  "scan": {
+    "lookback_days": 120,
+    "min_data_rows": 30,
+    "top_n": 20
+  },
+  "northbound": {
+    "consecutive_days_threshold": 3,
+    "anomaly_zscore_threshold": 2.0,
+    "ma_short_window": 20,
+    "ma_long_window": 60,
+    "top_n_holdings": 20,
+    "holding_change_top_n": 10,
+    "holdings_change_threshold": 0.5
+  },
+  "margin": {
+    "buy_ratio_hot": 0.10,
+    "buy_ratio_dangerous": 0.15,
+    "trend_short_window": 5,
+    "trend_long_window": 20,
+    "short_change_days": 5,
+    "top_n_margin_stocks": 20,
+    "buy_ratio_estimate_buckets": [
+      [1500, 0.18],
+      [1000, 0.12],
+      [500, 0.08],
+      [200, 0.05]
+    ]
+  },
+  "resonance": {
+    "enable_resonance": true,
+    "enable_divergence": true,
+    "pattern_weights": {
+      "bullish_resonance": 1.0,
+      "bearish_resonance": 1.0,
+      "cautious_divergence": 0.5,
+      "dangerous_divergence": 0.8
+    }
+  },
+  "futures": {
+    "basis_threshold": 0.3,
+    "oi_change_threshold": 2.0,
+    "oi_lookback_days": 5
+  },
+  "scoring": {
+    "northbound_weight": 0.4,
+    "margin_weight": 0.4,
+    "futures_weight": 0.2,
+    "risk_overheat_threshold": 0.7,
+    "resonance_boost_strong": 0.15,
+    "resonance_boost_weak": 0.08,
+    "resonance_dampen_strong": -0.10,
+    "resonance_dampen_weak": -0.05,
+    "resonance_strong_threshold": 0.3,
+    "risk_penalty_high_triggered": 8,
+    "risk_penalty_high_amount": 0.2,
+    "risk_penalty_high_base_threshold": 0.6,
+    "risk_penalty_medium_triggered": 6,
+    "risk_penalty_medium_amount": 0.1,
+    "risk_penalty_medium_base_threshold": 0.5
+  },
+  "llm": {
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 1536
+  },
+  "output": {
+    "dir": "output"
+  }
+}
