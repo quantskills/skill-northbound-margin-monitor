@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 PANORAMA_PROMPT_TEMPLATE = """你是一位资深 A 股宏观策略分析师，专精于资金面和市场情绪分析。
-以下是今日北向资金（沪深港通）+ 融资融券全景监控的全部信号数据。
+以下是今日北向资金（沪深港通）+ 融资融券 + 股指期货全景监控的全部信号数据。
 请基于这些信号，做一次专业的宏观资金面研判。
 
 ## 综合评分
@@ -34,6 +34,9 @@ PANORAMA_PROMPT_TEMPLATE = """你是一位资深 A 股宏观策略分析师，�
 ## 融资融券信号（6项）
 {mg_signals_table}
 
+## 股指期货信号
+{futures_table}
+
 ## 共振/背离分析
 {resonance_table}
 
@@ -42,7 +45,7 @@ PANORAMA_PROMPT_TEMPLATE = """你是一位资深 A 股宏观策略分析师，�
 
 ## 要求
 1. **市场状态判断**：当前资金面处于什么阶段？（进攻/防守/观望）用一句话总结。
-2. **信号冲突分析**：北向和融资之间是否存在分歧？哪个方向的信号更可信？
+2. **三维交叉验证**：北向、融资、期货三个独立维度是否相互印证？如果有矛盾，哪个维度更可信？
 3. **风险点识别**：列出 1-3 个最值得警惕的风险信号。
 4. **机会点识别**：如果有积极信号，指出可能的机会方向。
 5. **操作建议**：分别对短线交易者、中线投资者、长期配置资金给出差异化建议（各一句话）。
@@ -63,6 +66,7 @@ def build_panorama_prompt(
     short_balance_亿: float = 0,
     margin_buy_亿: float = 0,
     top_industries: Optional[list[str]] = None,
+    futures_signals: list | None = None,
 ) -> str:
     """Build the LLM prompt from panorama signal results.
 
@@ -78,6 +82,7 @@ def build_panorama_prompt(
         short_balance_亿: Total short balance in 亿 CNY.
         margin_buy_亿: Total margin buy amount in 亿 CNY.
         top_industries: Top industry names for context.
+        futures_signals: List of futures SignalResult (optional).
 
     Returns:
         Formatted prompt string ready for the LLM.
@@ -117,6 +122,17 @@ def build_panorama_prompt(
         res_lines.append(f"| {r.label} | {triggered} | {direction_icon} | {desc} |")
     resonance_table = "\n".join(res_lines) if res_lines else "（无共振/背离信号）"
 
+    # Futures signals table
+    futures_signals = futures_signals or []
+    fut_lines: list[str] = []
+    for s in futures_signals:
+        direction_icon = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(s.direction, "中性")
+        triggered = "触发" if s.triggered else "未触发"
+        fut_lines.append(
+            f"| {s.label} | {triggered} | {direction_icon} | 强度{s.strength:+.2f} | {s.summary} |"
+        )
+    futures_table = "\n".join(fut_lines) if fut_lines else "（无股指期货数据）"
+
     # Macro data
     industries_str = "、".join(top_industries[:5]) if top_industries else "数据不可用"
     macro_data = (
@@ -132,6 +148,7 @@ def build_panorama_prompt(
         nb_signals_table=nb_table,
         mg_signals_table=mg_table,
         resonance_table=resonance_table,
+        futures_table=futures_table,
         macro_data=macro_data,
     )
 
@@ -266,14 +283,16 @@ class LLMAnalyst:
         short_balance_亿: float = 0,
         margin_buy_億: float = 0,
         top_industries: Optional[list[str]] = None,
-    ) -> tuple[str, str]:
+        futures_signals: list | None = None,
+    ) -> tuple[str, str, str]:
         """Generate macro panorama analysis via LLM.
 
         Args:
             (all the signal + data inputs for the prompt)
 
         Returns:
-            (analysis_text, source) where source is "real" or "fallback".
+            (analysis_text, source, model) where source is "real" or "fallback"
+            and model is the actual model identifier used.
         """
         nb_triggered = sum(1 for s in nb_signals if s.triggered)
         mg_triggered = sum(1 for s in margin_signals if s.triggered)
@@ -291,6 +310,7 @@ class LLMAnalyst:
             short_balance_亿=short_balance_亿,
             margin_buy_亿=margin_buy_億,
             top_industries=top_industries,
+            futures_signals=futures_signals,
         )
 
         # Try API call
@@ -303,7 +323,7 @@ class LLMAnalyst:
                 nb_triggered, mg_triggered, res_triggered,
                 margin_balance_亿,
             )
-            return fallback, "fallback"
+            return fallback, "fallback", self._model
 
         try:
             resp = client.messages.create(
@@ -324,10 +344,10 @@ class LLMAnalyst:
                     nb_triggered, mg_triggered, res_triggered,
                     margin_balance_亿,
                 )
-                return fallback, "fallback"
+                return fallback, "fallback", self._model
 
             logger.info("LLM analysis generated (%d chars, model=%s)", len(text), self._model)
-            return text, "real"
+            return text, "real", self._model
 
         except Exception as e:
             logger.warning("LLM API call failed: %s — using fallback", e)
@@ -336,4 +356,4 @@ class LLMAnalyst:
                 nb_triggered, mg_triggered, res_triggered,
                 margin_balance_亿,
             )
-            return fallback, "fallback"
+            return fallback, "fallback", self._model

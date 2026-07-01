@@ -608,75 +608,114 @@ class DataFetcher:
     # ------------------------------------------------------------------
 
     def _fetch_index_futures_em(self) -> pd.DataFrame:
-        """Fetch stock index futures daily data from East Money via AKShare.
+        """Fetch stock index futures daily data from Sina + AKShare.
 
-        Attempts to fetch CSI 300 (IF), SSE 50 (IH), and CSI 500 (IC) near-month
-        continuous futures data. Returns a normalised DataFrame with columns:
-        date, contract, close, spot_close, open_interest, volume, index_name.
+        Uses ``futures_main_sina`` for continuous-contract futures OHLCV data
+        and ``stock_zh_index_daily`` for the underlying spot index prices.
+        Merges both to produce a normalised DataFrame with columns:
+        date, close, spot_close, open_interest, volume, index_name.
 
         Falls back gracefully if data is unavailable.
         """
         import akshare as ak
 
-        # Index futures contracts mapped to their East Money / AKShare identifiers
-        # We try multiple approaches to find the data
+        # Mapping: futures symbol → (label, spot-index symbol)
+        INDEX_MAP = {
+            "IF0": ("CSI300", "sh000300"),
+            "IH0": ("SSE50", "sh000016"),
+            "IC0": ("CSI500", "sh000905"),
+        }
+
         frames: list[pd.DataFrame] = []
 
-        # Approach 1: Try stock_index_futures_em if available
-        for index_name, em_code in [
-            ("CSI300", "IF"),
-            ("SSE50", "IH"),
-            ("CSI500", "IC"),
-        ]:
+        for fut_sym, (label, spot_sym) in INDEX_MAP.items():
             try:
-                df = _retry_api_call(
-                    ak.futures_spot_price,
-                    symbol=em_code,
-                    max_retries=1,
-                    description=f"Index futures {em_code} (EM)",
+                # 1. Fetch futures daily data (main continuous contract)
+                fut_df = _retry_api_call(
+                    ak.futures_main_sina,
+                    symbol=fut_sym,
+                    max_retries=2,
+                    description=f"Futures {fut_sym} (Sina)",
                 )
-                if df is not None and not df.empty:
-                    df = df.copy()
-                    df["index_name"] = index_name
-                    # Normalise columns
-                    _col_map = {
-                        "日期": "date_raw",
-                        "收盘价": "close",
-                        "开盘价": "open",
-                        "最高价": "high",
-                        "最低价": "low",
-                        "成交量": "volume",
-                        "持仓量": "open_interest",
-                        "昨结算": "prev_settle",
-                        "品种代码": "contract",
-                    }
-                    df = df.rename(columns={
-                        k: v for k, v in _col_map.items() if k in df.columns
-                    })
-                    if "date_raw" in df.columns:
-                        df["date"] = pd.to_datetime(df["date_raw"]).dt.strftime("%Y%m%d")
-                    elif "date" not in df.columns:
-                        # Try to find any date column
-                        for dc in ["date", "日期", "trade_date"]:
-                            if dc in df.columns:
-                                df["date"] = pd.to_datetime(df[dc]).dt.strftime("%Y%m%d")
-                                break
-                    frames.append(df)
-                    logger.info("Index futures %s: %d rows", em_code, len(df))
+                if fut_df is None or fut_df.empty:
+                    logger.debug("Futures %s: no data returned", fut_sym)
+                    continue
+
+                fut_df = fut_df.copy()
+
+                # Normalise Chinese column names → English
+                _fut_col_map = {
+                    "日期": "date",
+                    "收盘价": "close",
+                    "开盘价": "open",
+                    "最高价": "high",
+                    "最低价": "low",
+                    "成交量": "volume",
+                    "持仓量": "open_interest",
+                }
+                fut_df = fut_df.rename(columns=_fut_col_map)
+                # Keep only the columns we need
+                keep_cols = ["date", "close", "open", "high", "low", "volume", "open_interest"]
+                fut_df = fut_df[[c for c in keep_cols if c in fut_df.columns]].copy()
+
+                # 2. Fetch spot index daily data
+                spot_df = _retry_api_call(
+                    ak.stock_zh_index_daily,
+                    symbol=spot_sym,
+                    max_retries=2,
+                    description=f"Spot index {spot_sym}",
+                )
+                if spot_df is None or spot_df.empty:
+                    logger.debug("Spot index %s: no data returned", spot_sym)
+                    continue
+
+                spot_df = spot_df.copy()
+                spot_col_map = {
+                    "date": "date",
+                    "close": "spot_close",
+                    "open": "spot_open",
+                    "high": "spot_high",
+                    "low": "spot_low",
+                }
+                spot_df = spot_df.rename(columns=spot_col_map)
+                spot_keep = ["date", "spot_close"]
+                spot_df = spot_df[[c for c in spot_keep if c in spot_df.columns]].copy()
+
+                # 3. Merge futures + spot on date
+                fut_df["date"] = pd.to_datetime(fut_df["date"])
+                spot_df["date"] = pd.to_datetime(spot_df["date"])
+                merged = fut_df.merge(spot_df, on="date", how="inner")
+                merged = merged.sort_values("date")
+
+                if merged.empty:
+                    logger.debug("Futures %s: merge with spot resulted in 0 rows", fut_sym)
+                    continue
+
+                # Convert numeric columns
+                for col in ["close", "open_interest", "volume", "spot_close"]:
+                    if col in merged.columns:
+                        merged[col] = pd.to_numeric(merged[col], errors="coerce")
+
+                merged["date"] = merged["date"].dt.strftime("%Y%m%d")
+                merged["index_name"] = label
+                merged["contract"] = fut_sym
+
+                frames.append(merged)
+                logger.info(
+                    "Futures %s (%s): %d rows, spot %s",
+                    fut_sym, label, len(merged), spot_sym,
+                )
             except Exception as e:
-                logger.debug("Index futures %s unavailable: %s", em_code, e)
+                logger.debug("Index futures %s (%s) unavailable: %s", fut_sym, label, e)
 
         if frames:
             result = pd.concat(frames, ignore_index=True)
-            result.attrs["source"] = "eastmoney"
-            # Estimate spot_close from basis column if present, or from close
-            if "spot_close" not in result.columns:
-                # For continuous futures, the close IS the futures price
-                # Spot price needs to come from index data
-                # We'll mark spot_close as NaN and let downstream handle it
-                result["spot_close"] = result.get("close", np.nan)
-            logger.info("Index futures: %d rows across %d indices", len(result),
-                        result["index_name"].nunique() if "index_name" in result.columns else 0)
+            result.attrs["source"] = "sina_eastmoney"
+            logger.info(
+                "Index futures: %d rows across %d indices",
+                len(result),
+                result["index_name"].nunique() if "index_name" in result.columns else 0,
+            )
             return result
 
         return pd.DataFrame()

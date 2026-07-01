@@ -67,6 +67,7 @@ def generate_markdown_report(
     config: dict,
     llm_analysis: str = "",
     llm_source: str = "none",
+    llm_model: str = "",
     futures_signals: list[SignalResult] | None = None,
     futures_data: pd.DataFrame | None = None,
 ) -> str:
@@ -336,7 +337,7 @@ def generate_markdown_report(
         add("## 四·五、AI 宏观研判")
         add("")
         if llm_source == "real":
-            add(f"*由 {config.get('llm', {}).get('model', 'LLM')} 基于以上全部信号综合分析生成*")
+            add(f"*由 {llm_model or config.get('llm', {}).get('model', 'LLM')} 基于以上全部信号综合分析生成*")
         elif llm_source == "fallback":
             add("*⚠️ LLM API 不可用，以下为规则引擎生成的基础分析*")
         else:
@@ -463,6 +464,7 @@ def generate_json_output(
     config: dict,
     llm_analysis: str = "",
     llm_source: str = "none",
+    llm_model: str = "",
     futures_signals: list[SignalResult] | None = None,
     futures_data: pd.DataFrame | None = None,
 ) -> dict:
@@ -574,7 +576,7 @@ def generate_json_output(
         "llm": {
             "source": llm_source,
             "analysis": llm_analysis,
-            "model": config.get("llm", {}).get("model", "unknown"),
+            "model": llm_model or config.get("llm", {}).get("model", "unknown"),
         },
         "provenance": provenance,
     }

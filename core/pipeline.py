@@ -247,6 +247,7 @@ class PanoramaPipeline:
         # 9.5. LLM macro analysis
         llm_analysis = ""
         llm_source = "none"
+        llm_model = ""
         if _LLM_AVAILABLE:
             logger.info("Running LLM macro analysis ...")
             try:
@@ -279,7 +280,7 @@ class PanoramaPipeline:
                     top_industries = stock_info["industry"].value_counts().head(5).index.tolist()
 
                 llm = _LLMAnalyst(config=self._config)
-                llm_analysis, llm_source = llm.analyze(
+                llm_analysis, llm_source, llm_model = llm.analyze(
                     composite_score=composite.score,
                     composite_grade=composite.grade,
                     composite_label=composite.label,
@@ -293,11 +294,12 @@ class PanoramaPipeline:
                     margin_buy_億=mg_buy_億,
                     top_industries=top_industries,
                 )
-                logger.info("LLM analysis: source=%s, length=%d chars", llm_source, len(llm_analysis))
+                logger.info("LLM analysis: model=%s, source=%s, length=%d chars", llm_model, llm_source, len(llm_analysis))
             except Exception as e:
                 logger.warning("LLM analysis failed: %s", e)
                 llm_analysis = f"（LLM 分析不可用: {e}）"
                 llm_source = "error"
+                llm_model = ""
         else:
             logger.info("LLM module not available — skipping macro analysis")
 
@@ -321,6 +323,7 @@ class PanoramaPipeline:
             config=self._config,
             llm_analysis=llm_analysis,
             llm_source=llm_source,
+            llm_model=llm_model,
         )
 
         json_data = generate_json_output(
@@ -341,6 +344,7 @@ class PanoramaPipeline:
             config=self._config,
             llm_analysis=llm_analysis,
             llm_source=llm_source,
+            llm_model=llm_model,
         )
 
         md_path, json_path = write_report(

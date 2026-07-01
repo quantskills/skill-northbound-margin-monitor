@@ -28,22 +28,40 @@ logger = logging.getLogger(__name__)
 
 def _resolve_net_column(
     nb_summary: pd.DataFrame,
+    recent_check_days: int = 10,
 ) -> tuple[Optional[str], pd.DataFrame]:
     """Resolve a usable net flow column from *nb_summary*.
 
-    Fallback chain:
+    Fallback chain (each step validates recent data quality before accepting):
+
       1. Direct net columns (net_buy_amount, net_buy, etc.)
-      2. Market value diff (if market_value is non-zero recently)
+         — accepted only if ≥3 of the last *recent_check_days* rows are non-NaN.
+      2. Market value diff
+         — accepted only if ≥3 of the last *recent_check_days* mv values are > 0.
       3. CSI300 index diff (last resort proxy)
+         — accepted only if ≥3 of the last *recent_check_days* csi300 values are > 0.
+
+    Without these quality checks, a column that exists but has all-NaN recent
+    data produces bogus signals (all-zero net flow → fake "accelerating outflow").
 
     Returns:
         (column_name, df) — column_name may be ``None`` if unresolvable;
         *df* may be a modified copy of *nb_summary* (sorted + extra column).
     """
-    # 1. Direct net flow columns
+    MIN_RECENT_VALID = 3  # at least this many recent data points needed
+
+    # 1. Direct net flow columns — check recent data quality
     for candidate in ["net_buy_amount", "net_buy", "net_flow", "资金净流入", "净买入"]:
         if candidate in nb_summary.columns:
-            return candidate, nb_summary
+            recent = pd.to_numeric(
+                nb_summary[candidate].tail(recent_check_days), errors="coerce"
+            )
+            if recent.notna().sum() >= MIN_RECENT_VALID:
+                return candidate, nb_summary
+            logger.debug(
+                "Column '%s' exists but only %d/%d recent values are non-NaN — skipping",
+                candidate, recent.notna().sum(), len(recent),
+            )
 
     # 2. Market value diff
     mv_col = None
@@ -54,9 +72,13 @@ def _resolve_net_column(
     if mv_col is not None:
         df = nb_summary.sort_values("date", ascending=True).copy()
         df["_net"] = df[mv_col].diff()
-        recent_mv = pd.to_numeric(df[mv_col].tail(5), errors="coerce")
-        if recent_mv.notna().sum() > 0 and (recent_mv > 0).any():
+        recent_mv = pd.to_numeric(df[mv_col].tail(recent_check_days), errors="coerce")
+        if (recent_mv > 0).sum() >= MIN_RECENT_VALID:
             return "_net", df
+        logger.debug(
+            "market_value diff: only %d/%d recent values > 0 — skipping",
+            (recent_mv > 0).sum(), len(recent_mv),
+        )
 
     # 3. CSI300 diff (last resort proxy)
     csi_col = None
@@ -67,7 +89,13 @@ def _resolve_net_column(
     if csi_col is not None:
         df = nb_summary.sort_values("date", ascending=True).copy()
         df["_net"] = df[csi_col].diff()
-        return "_net", df
+        recent_csi = pd.to_numeric(df[csi_col].tail(recent_check_days), errors="coerce")
+        if (recent_csi > 0).sum() >= MIN_RECENT_VALID:
+            return "_net", df
+        logger.debug(
+            "CSI300 diff: only %d/%d recent values > 0 — skipping",
+            (recent_csi > 0).sum(), len(recent_csi),
+        )
 
     return None, nb_summary
 

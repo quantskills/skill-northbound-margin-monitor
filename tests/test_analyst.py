@@ -327,13 +327,15 @@ class TestLLMAnalystAnalyze:
     def test_fallback_when_no_api_key(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
         analyst = LLMAnalyst()
         nb, mg, res = self._analyze_inputs()
-        text, source = analyst.analyze(
+        text, source, model = analyst.analyze(
             50.0, "C", "中性", "中性", nb, mg, res,
         )
         assert source == "fallback"
         assert "观望偏多" in text
+        assert model == "claude-sonnet-4-6"
 
     def test_fallback_on_api_error(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-will-fail")
@@ -341,7 +343,7 @@ class TestLLMAnalystAnalyze:
         try:
             analyst = LLMAnalyst()
             nb, mg, res = self._analyze_inputs()
-            text, source = analyst.analyze(
+            text, source, model = analyst.analyze(
                 70.0, "B", "偏多", "偏多", nb, mg, res,
             )
             assert source == "fallback"
@@ -357,7 +359,7 @@ class TestLLMAnalystAnalyze:
         try:
             analyst = LLMAnalyst()
             nb, mg, res = self._analyze_inputs()
-            text, source = analyst.analyze(
+            text, source, model = analyst.analyze(
                 40.0, "D", "偏空", "偏空", nb, mg, res,
             )
             assert source == "fallback"
@@ -374,7 +376,7 @@ class TestLLMAnalystAnalyze:
         try:
             analyst = LLMAnalyst()
             nb, mg, res = self._analyze_inputs()
-            text, source = analyst.analyze(
+            text, source, model = analyst.analyze(
                 55.0, "C+", "中性偏多", "中性偏多", nb, mg, res,
             )
             assert source == "real"
