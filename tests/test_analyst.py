@@ -230,7 +230,7 @@ class TestLLMAnalystInit:
 
     def test_max_tokens_default(self):
         analyst = LLMAnalyst()
-        assert analyst._max_tokens == 1536
+        assert analyst._max_tokens == 2048
 
     def test_max_tokens_from_config(self):
         analyst = LLMAnalyst({"llm": {"max_tokens": 2048}})

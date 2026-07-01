@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def _resolve_net_column(
     nb_summary: pd.DataFrame,
     recent_check_days: int = 10,
-) -> tuple[Optional[str], pd.DataFrame]:
+) -> tuple[Optional[str], pd.DataFrame, Optional[str]]:
     """Resolve a usable net flow column from *nb_summary*.
 
     Fallback chain (each step validates recent data quality before accepting):
@@ -45,8 +45,10 @@ def _resolve_net_column(
     data produces bogus signals (all-zero net flow → fake "accelerating outflow").
 
     Returns:
-        (column_name, df) — column_name may be ``None`` if unresolvable;
-        *df* may be a modified copy of *nb_summary* (sorted + extra column).
+        (column_name, df, source_type) — column_name may be ``None`` if
+        unresolvable; *df* may be a modified copy of *nb_summary* (sorted +
+        extra column); *source_type* is one of ``"direct"``, ``"market_value"``,
+        ``"csi300"``, or ``None``.
     """
     MIN_RECENT_VALID = 3  # at least this many recent data points needed
 
@@ -57,7 +59,7 @@ def _resolve_net_column(
                 nb_summary[candidate].tail(recent_check_days), errors="coerce"
             )
             if recent.notna().sum() >= MIN_RECENT_VALID:
-                return candidate, nb_summary
+                return candidate, nb_summary, "direct"
             logger.debug(
                 "Column '%s' exists but only %d/%d recent values are non-NaN — skipping",
                 candidate, recent.notna().sum(), len(recent),
@@ -74,7 +76,7 @@ def _resolve_net_column(
         df["_net"] = df[mv_col].diff()
         recent_mv = pd.to_numeric(df[mv_col].tail(recent_check_days), errors="coerce")
         if (recent_mv > 0).sum() >= MIN_RECENT_VALID:
-            return "_net", df
+            return "_net", df, "market_value"
         logger.debug(
             "market_value diff: only %d/%d recent values > 0 — skipping",
             (recent_mv > 0).sum(), len(recent_mv),
@@ -91,13 +93,13 @@ def _resolve_net_column(
         df["_net"] = df[csi_col].diff()
         recent_csi = pd.to_numeric(df[csi_col].tail(recent_check_days), errors="coerce")
         if (recent_csi > 0).sum() >= MIN_RECENT_VALID:
-            return "_net", df
+            return "_net", df, "csi300"
         logger.debug(
             "CSI300 diff: only %d/%d recent values > 0 — skipping",
             (recent_csi > 0).sum(), len(recent_csi),
         )
 
-    return None, nb_summary
+    return None, nb_summary, None
 
 
 # ------------------------------------------------------------------
@@ -122,7 +124,7 @@ def detect_flow_trend(
     if nb_summary.empty:
         return neutral_signal(key, label, "无北向资金数据")
 
-    net_col, nb_summary = _resolve_net_column(nb_summary)
+    net_col, nb_summary, _ = _resolve_net_column(nb_summary)
     if net_col is None:
         return neutral_signal(key, label, "无法计算净流向")
 
@@ -192,7 +194,7 @@ def detect_single_day_anomaly(
     if nb_summary.empty:
         return neutral_signal(key, label, "无北向资金数据")
 
-    net_col, nb_summary = _resolve_net_column(nb_summary)
+    net_col, nb_summary, _ = _resolve_net_column(nb_summary)
     if net_col is None:
         return neutral_signal(key, label, "无法计算净流向")
 
@@ -261,7 +263,7 @@ def detect_sector_preference(
     if stock_info.empty or "industry" not in stock_info.columns:
         return neutral_signal(key, label, "无行业分类数据，无法计算板块偏好")
 
-    # Check for overall direction
+    # Check for overall direction — try market_value first, then net_buy, then proxy
     df = nb_summary.sort_values("date", ascending=True)
     mv_col = None
     for candidate in ["market_value", "持股市值"]:
@@ -269,21 +271,27 @@ def detect_sector_preference(
             mv_col = candidate
             break
 
+    proxy_note = ""
+    if mv_col is not None:
+        recent_mv = pd.to_numeric(df[mv_col].tail(10), errors="coerce")
+        mv_usable = (recent_mv > 0).sum() >= 3
+        if mv_usable:
+            recent = recent_mv.dropna()
+            if len(recent) >= 6:
+                recent_change = recent.iloc[-1] - recent.iloc[-6]
+            else:
+                recent_change = 0
+        else:
+            # market_value is all 0 — fall back to net column resolution
+            mv_col = None
+
     if mv_col is None:
-        # Try to determine direction from net flow
-        net_col = None
-        for candidate in ["net_buy_amount", "net_buy", "资金净流入"]:
-            if candidate in df.columns:
-                net_col = candidate
-                break
+        net_col, df_resolved, net_source = _resolve_net_column(df)
         if net_col is None:
             return neutral_signal(key, label, "无法计算板块偏好")
-        recent_change = pd.to_numeric(df[net_col].tail(5), errors="coerce").sum()
-    else:
-        recent = pd.to_numeric(df[mv_col], errors="coerce").dropna()
-        if len(recent) < 6:
-            return neutral_signal(key, label, "市值数据不足")
-        recent_change = recent.iloc[-1] - recent.iloc[-6]
+        if net_source == "csi300":
+            proxy_note = "（注：北向净买入数据不可用，方向基于沪深300替代指标）"
+        recent_change = pd.to_numeric(df_resolved[net_col].tail(5), errors="coerce").sum()
 
     # Count industries (proxy for sector concentration)
     industry_counts = stock_info["industry"].value_counts()
@@ -292,9 +300,6 @@ def detect_sector_preference(
     direction = "bullish" if recent_change > 0 else "bearish"
     change_pct = abs(recent_change)
 
-    # This is a simplified sector analysis since per-stock northbound
-    # holdings are not directly available. The real sector breakdown
-    # would require stock-level holdings data.
     detail = {
         "overall_direction": "净流入" if recent_change > 0 else "净流出",
         "top_industries_by_count": top_industries,
@@ -309,6 +314,7 @@ def detect_sector_preference(
     summary = (
         f"北向资金整体{'流入' if recent_change > 0 else '流出'}，"
         f"重点关注行业：{'、'.join(top_industries[:3])}"
+        + (f" {proxy_note}" if proxy_note else "")
     )
 
     return SignalResult(
@@ -417,7 +423,7 @@ def detect_cumulative_trend(
     if nb_summary.empty:
         return neutral_signal(key, label, "无北向资金数据")
 
-    net_col, nb_summary = _resolve_net_column(nb_summary)
+    net_col, nb_summary, net_source = _resolve_net_column(nb_summary)
     if net_col is None:
         return neutral_signal(key, label, "无法计算累计趋势")
 
@@ -472,9 +478,21 @@ def detect_cumulative_trend(
         "regime": regime,
         "ma_short_window": ma_short,
         "ma_long_window": ma_long,
+        "net_source": net_source,
     }
 
-    summary = f"累计净买入MA{ma_short}({current_ma20/1e8:.1f}亿){'＞' if above else '＜'}MA{ma_long}({current_ma60/1e8:.1f}亿)，{regime}"
+    # Format summary based on data source
+    if net_source == "csi300":
+        summary = (
+            f"沪深300累计变动MA{ma_short}({current_ma20:.0f}点)"
+            f"{'＞' if above else '＜'}MA{ma_long}({current_ma60:.0f}点)，{regime}"
+            f"（北向净买入数据不可用，使用沪深300替代）"
+        )
+    else:
+        summary = (
+            f"累计净买入MA{ma_short}({current_ma20/1e8:.1f}亿)"
+            f"{'＞' if above else '＜'}MA{ma_long}({current_ma60/1e8:.1f}亿)，{regime}"
+        )
 
     return SignalResult(
         key=key, label=label, triggered=triggered,

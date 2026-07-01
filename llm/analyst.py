@@ -230,7 +230,7 @@ class LLMAnalyst:
             or self._config.get("llm", {}).get("model", "claude-sonnet-4-6")
         )
         self._max_tokens = int(
-            self._config.get("llm", {}).get("max_tokens", 1536)
+            self._config.get("llm", {}).get("max_tokens", 2048)
         )
         self._base_url = os.getenv("ANTHROPIC_BASE_URL") or None
         self._client = None

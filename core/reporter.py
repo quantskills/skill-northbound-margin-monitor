@@ -147,7 +147,11 @@ def generate_markdown_report(
                 net_col = c
                 break
 
+        mv_data_usable = False
         if mv_col is not None:
+            recent_mv = pd.to_numeric(nb_summary[mv_col].tail(10), errors="coerce")
+            mv_data_usable = (recent_mv > 0).sum() >= 3
+        if mv_data_usable and mv_col is not None:
             recent = pd.to_numeric(nb_summary[mv_col], errors="coerce").dropna()
             if len(recent) >= 2:
                 latest_mv = recent.iloc[-1]
@@ -155,10 +159,19 @@ def generate_markdown_report(
                 chg = (latest_mv - prev_mv) / prev_mv * 100 if prev_mv != 0 else 0
                 add(f"- 最新持仓市值: {latest_mv/1e8:.0f} 亿元")
                 add(f"- 5日市值变动: {chg:+.2f}%")
+        else:
+            add("- 持仓市值: 近期数据不可用")
+
+        net_data_usable = False
         if net_col is not None:
+            recent_net = pd.to_numeric(nb_summary[net_col].tail(10), errors="coerce")
+            net_data_usable = recent_net.notna().sum() >= 3
+        if net_data_usable and net_col is not None:
             recent_net = pd.to_numeric(nb_summary[net_col], errors="coerce").tail(5)
             net_5d = recent_net.sum()
             add(f"- 近5日净买入合计: {net_5d/1e8:+.1f} 亿元")
+        elif not mv_data_usable:
+            add("- 净买入数据: 近期不可用（使用替代指标估算）")
         add("")
 
     add("---")
@@ -283,7 +296,7 @@ def generate_markdown_report(
     add("")
 
     # ── 3. Resonance analysis ──
-    add("## 三、共振/背离分析")
+    add("## 四、共振/背离分析")
     add("")
 
     triggered_resonance = [r for r in resonance_results if r.triggered]
@@ -307,7 +320,7 @@ def generate_markdown_report(
     add("")
 
     # ── 4. Sentiment summary ──
-    add("## 四、综合情绪评估")
+    add("## 五、综合情绪评估")
     add("")
     add(f"**综合评分**: {composite.score:.0f}/100 ({composite.grade})")
     add("")
@@ -334,7 +347,7 @@ def generate_markdown_report(
 
     # ── 4.5. LLM Macro Analysis ──
     if llm_analysis and llm_source not in ("none",):
-        add("## 四·五、AI 宏观研判")
+        add("## 六、AI 宏观研判")
         add("")
         if llm_source == "real":
             add(f"*由 {llm_model or config.get('llm', {}).get('model', 'LLM')} 基于以上全部信号综合分析生成*")
@@ -350,7 +363,7 @@ def generate_markdown_report(
     add("")
 
     # ── 6. Sector flow ──
-    add("## 六、板块资金流向")
+    add("## 七、板块资金流向")
     add("")
 
     if not stock_info.empty and "industry" in stock_info.columns:
@@ -371,7 +384,7 @@ def generate_markdown_report(
     add("")
 
     # ── 7. Risk alerts ──
-    add("## 七、风险提示")
+    add("## 八、风险提示")
     add("")
 
     # Compile risk alerts from all signals
@@ -400,7 +413,7 @@ def generate_markdown_report(
     add("")
 
     # ── 8. Data provenance ──
-    add("## 八、数据溯源")
+    add("## 九、数据溯源")
     add("")
     add("| 数据类别 | 数据源 | 状态 |")
     add("|----------|--------|------|")
