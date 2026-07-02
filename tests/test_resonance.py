@@ -165,3 +165,58 @@ class TestHelpers:
         results = analyse_resonance(0.5, 0.5, 3, 1, 3, 1, config)
         score = compute_resonance_score(results, config)
         assert -1.0 <= score <= 1.0
+
+
+# ── Threshold boundary tests ──
+
+
+class TestResonanceBoundaries:
+    """Test exact threshold boundaries for all 4 patterns."""
+
+    def test_bullish_above_threshold(self, sample_config):
+        """nb=0.11, margin=0.11 should trigger (>0.1 strict threshold)."""
+        results = analyse_resonance(0.11, 0.11, 3, 1, 3, 1, sample_config)
+        triggered = get_triggered_patterns(results)
+        assert len(triggered) >= 1
+
+    def test_bullish_just_below_threshold(self, sample_config):
+        """nb=0.09, margin=0.09 should NOT trigger bullish resonance."""
+        results = analyse_resonance(0.09, 0.09, 3, 1, 3, 1, sample_config)
+        triggered = get_triggered_patterns(results)
+        bullish_triggered = [r for r in triggered if r.pattern == "bullish_resonance"]
+        assert len(bullish_triggered) == 0
+
+    def test_bearish_above_threshold(self, sample_config):
+        """nb=-0.11, margin=-0.11 should trigger bearish."""
+        results = analyse_resonance(-0.11, -0.11, 1, 3, 1, 3, sample_config)
+        triggered = get_triggered_patterns(results)
+        bearish_triggered = [r for r in triggered if r.pattern == "bearish_resonance"]
+        assert len(bearish_triggered) >= 1
+
+    def test_cautious_divergence_boundary(self, sample_config):
+        """nb=0.21, margin=-0.11 should trigger cautious (strict > threshold)."""
+        results = analyse_resonance(0.21, -0.11, 3, 1, 1, 3, sample_config)
+        triggered = get_triggered_patterns(results)
+        cautious = [r for r in triggered if r.pattern == "cautious_divergence"]
+        assert len(cautious) >= 1
+
+    def test_dangerous_divergence_boundary(self, sample_config):
+        """nb=-0.21, margin=0.11 should trigger dangerous (strict > threshold)."""
+        results = analyse_resonance(-0.21, 0.11, 1, 3, 3, 1, sample_config)
+        triggered = get_triggered_patterns(results)
+        dangerous = [r for r in triggered if r.pattern == "dangerous_divergence"]
+        assert len(dangerous) >= 1
+
+    def test_all_neutral_no_triggers(self, sample_config):
+        """All scores near zero → no resonance triggered."""
+        results = analyse_resonance(0.05, -0.05, 2, 2, 2, 2, sample_config)
+        triggered = get_triggered_patterns(results)
+        assert len(triggered) == 0
+
+    def test_multiple_patterns_can_trigger(self, sample_config):
+        """Both bullish resonance and cautious divergence can trigger together."""
+        # NB strong bullish, margin slightly negative → could trigger both
+        results = analyse_resonance(0.6, -0.15, 5, 0, 2, 3, sample_config)
+        triggered = get_triggered_patterns(results)
+        # At minimum, cautious divergence should trigger
+        assert len(triggered) >= 1

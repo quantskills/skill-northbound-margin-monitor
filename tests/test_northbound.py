@@ -4,8 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core._types import apply_signal_decay, SignalResult
+from core._types import apply_signal_decay, neutral_signal, SignalResult
 from core.northbound import (
+    _resolve_net_column,
     detect_flow_trend,
     detect_single_day_anomaly,
     detect_sector_preference,
@@ -345,3 +346,163 @@ class TestHelpers:
         sig = SignalResult("test", "测试", True, -0.6, "bearish", "test", {"consecutive_days": 10})
         decayed = apply_signal_decay(sig, half_life_days=10)
         assert decayed < 0
+
+    def test_neutral_signal_direct(self):
+        """neutral_signal() should return SignalResult with neutral defaults."""
+        result = neutral_signal("my_key", "我的标签", "没有数据")
+        assert isinstance(result, SignalResult)
+        assert result.key == "my_key"
+        assert result.label == "我的标签"
+        assert not result.triggered
+        assert result.strength == 0.0
+        assert result.direction == "neutral"
+        assert result.summary == "没有数据"
+
+
+# ── _resolve_net_column tests ──
+
+
+class TestResolveNetColumn:
+    """Direct tests for the 3-tier net column resolution fallback chain."""
+
+    def test_direct_net_buy_amount(self):
+        """Tier 1: net_buy_amount column with valid recent data."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "net_buy_amount": list(range(30)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col == "net_buy_amount"
+        assert source == "direct"
+
+    def test_direct_chinese_column(self):
+        """Tier 1: Chinese column name 资金净流入 with valid data."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "资金净流入": list(range(30)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col == "资金净流入"
+        assert source == "direct"
+
+    def test_direct_skips_column_with_nan_recent(self):
+        """Tier 1: column exists but recent values are NaN → skip to next tier."""
+        data = list(range(30))
+        # Last 10 values are NaN → quality check fails
+        data[-10:] = [np.nan] * 10
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "net_buy_amount": data,
+            "market_value": list(range(100, 130)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        # Should fall back to market_value diff
+        assert col == "_net"
+        assert source == "market_value"
+
+    def test_market_value_fallback(self):
+        """Tier 2: no net column → use market_value diff."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "market_value": list(range(100, 130)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col == "_net"
+        assert source == "market_value"
+        assert "_net" in out_df.columns
+
+    def test_market_value_chinese_column(self):
+        """Tier 2: Chinese market value column 持股市值."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "持股市值": list(range(100, 130)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col == "_net"
+        assert source == "market_value"
+
+    def test_csi300_fallback(self):
+        """Tier 3: no net or market_value → use CSI300 diff."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "CSI300": list(range(3500, 3530)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col == "_net"
+        assert source == "csi300"
+
+    def test_csi300_chinese_column(self):
+        """Tier 3: Chinese CSI300 column 沪深300."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "沪深300": list(range(3500, 3530)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col == "_net"
+        assert source == "csi300"
+
+    def test_all_tiers_fail(self):
+        """No usable columns → returns None, None."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "some_other_column": list(range(30)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col is None
+        assert source is None
+
+    def test_market_value_recent_all_zero(self):
+        """Market value column exists but all recent values are ≤0 → skip to CSI300 or None."""
+        data = [0] * 30
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "market_value": data,
+        })
+        col, out_df, source = _resolve_net_column(df)
+        # Should fail all tiers since no CSI300 column either
+        assert col is None
+        assert source is None
+
+    def test_net_buy_all_nan(self):
+        """net_buy_amount exists but ALL values are NaN."""
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "net_buy_amount": [np.nan] * 30,
+        })
+        col, out_df, source = _resolve_net_column(df)
+        # No usable data → falls through all tiers
+        assert col is None
+        assert source is None
+
+    def test_sorts_by_date_for_diff(self):
+        """Market value fallback should sort df by date before diff."""
+        # Create data in reverse date order
+        df = pd.DataFrame({
+            "date": [f"20260{30 - i:03d}" for i in range(30)],
+            "market_value": list(range(100, 130)),
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert source == "market_value"
+        # After sort, first row should be the earliest date
+        assert out_df["date"].iloc[0] == "20260001"
+
+    def test_csi300_recent_zero_quality_fails(self):
+        """CSI300 with all-zero recent values should fail quality check."""
+        data = [0] * 30
+        df = pd.DataFrame({
+            "date": [f"20260{i:03d}" for i in range(1, 31)],
+            "csi300": data,
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col is None
+        assert source is None
+
+    def test_short_data_still_works(self):
+        """Less than recent_check_days total rows but enough valid values."""
+        df = pd.DataFrame({
+            "date": ["20260601", "20260602", "20260603", "20260604", "20260605"],
+            "net_buy_amount": [1.0, 2.0, 3.0, 4.0, 5.0],
+        })
+        col, out_df, source = _resolve_net_column(df)
+        assert col == "net_buy_amount"
+        assert source == "direct"

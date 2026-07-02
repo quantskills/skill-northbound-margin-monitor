@@ -141,3 +141,29 @@ class TestCacheCorruption:
         assert loaded_md.empty
         assert loaded_info.empty
         assert loaded_fut.empty
+
+    def test_load_nb_flow_success(self, cache):
+        """load_nb_flow() should return the northbound flow DataFrame."""
+        nb = pd.DataFrame({"date": ["20260630"], "market_value": [21000]})
+        nb_flow = pd.DataFrame({"板块": ["沪股通", "深股通"], "资金方向": ["北向", "北向"]})
+        cache.save("20260630", nb, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+                   northbound_flow_df=nb_flow)
+        loaded_flow = cache.load_nb_flow("20260630")
+        assert not loaded_flow.empty
+        assert len(loaded_flow) == 2
+        assert "板块" in loaded_flow.columns
+
+    def test_load_nb_flow_saves_and_loads_futures(self, cache):
+        """save() with futures_df should persist to futures.parquet."""
+        nb = pd.DataFrame({"date": ["20260630"]})
+        fut = pd.DataFrame({
+            "date": ["20260630"],
+            "index_name": ["CSI300"],
+            "close": [4000],
+        })
+        cache.save("20260630", nb, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+                   futures_df=fut)
+        _, _, _, _, loaded_fut = cache.load("20260630")
+        assert not loaded_fut.empty
+        assert len(loaded_fut) == 1
+        assert "index_name" in loaded_fut.columns

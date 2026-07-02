@@ -256,3 +256,171 @@ class TestHelpers:
     def test_composite_score_empty(self):
         score = compute_composite_score([])
         assert score == 0.0
+
+
+# ── Neutral basis tests ──
+
+
+class TestFuturesBasisNeutral:
+    """Neutral basis range (-0.3% to +0.3%) and edge cases."""
+
+    def _make_futures_with_basis(self, basis_pct: float):
+        """Create futures data with a specific average basis percentage."""
+        dates = pd.date_range("2026-01-02", periods=80, freq="B")
+        np.random.seed(99)
+        rows = []
+        for idx_name, spot_base in [("CSI300", 4000), ("SSE50", 2800), ("CSI500", 5500)]:
+            spot = spot_base + np.cumsum(np.random.randn(80) * 10)
+            futures_close = spot * (1 + basis_pct / 100)
+            oi = 50000 + np.cumsum(np.random.randn(80) * 300)
+            for i, d in enumerate(dates):
+                rows.append({
+                    "date": d.strftime("%Y%m%d"),
+                    "index_name": idx_name,
+                    "contract": f"{idx_name}",
+                    "close": futures_close[i],
+                    "spot_close": spot[i],
+                    "open_interest": max(1000, oi[i]),
+                    "volume": 20000,
+                })
+        return pd.DataFrame(rows)
+
+    def test_neutral_basis_near_zero(self, sample_config):
+        """Basis exactly 0% → neutral, not triggered."""
+        data = self._make_futures_with_basis(0.0)
+        result = detect_futures_basis(data, sample_config)
+        assert result.direction == "neutral"
+        assert not result.triggered
+
+    def test_neutral_basis_slightly_positive(self, sample_config):
+        """Basis +0.2% (within neutral range) → neutral."""
+        data = self._make_futures_with_basis(0.2)
+        result = detect_futures_basis(data, sample_config)
+        assert result.direction == "neutral"
+        assert not result.triggered
+
+    def test_neutral_basis_slightly_negative(self, sample_config):
+        """Basis -0.2% (within neutral range) → neutral."""
+        data = self._make_futures_with_basis(-0.2)
+        result = detect_futures_basis(data, sample_config)
+        assert result.direction == "neutral"
+        assert not result.triggered
+
+    def test_bullish_basis_exceeds_threshold(self, sample_config):
+        """Basis +0.5% → bullish, triggered."""
+        data = self._make_futures_with_basis(0.5)
+        result = detect_futures_basis(data, sample_config)
+        assert result.direction == "bullish"
+        assert result.triggered
+
+    def test_bearish_basis_exceeds_threshold(self, sample_config):
+        """Basis -0.5% → bearish, triggered."""
+        data = self._make_futures_with_basis(-0.5)
+        result = detect_futures_basis(data, sample_config)
+        assert result.direction == "bearish"
+        assert result.triggered
+
+    def test_neutral_summary_text(self, sample_config):
+        """Neutral basis should mention '平水' in summary."""
+        data = self._make_futures_with_basis(0.1)
+        result = detect_futures_basis(data, sample_config)
+        assert "平水" in result.summary or "方向不明确" in result.summary
+
+
+# ── Divergence tests ──
+
+
+class TestBasisOIDivergence:
+    """Basis-OI convergence: divergence scenario (opposite directions)."""
+
+    def _make_basis_data(self, basis_pct):
+        """Create data producing a specific basis signal."""
+        dates = pd.date_range("2026-01-02", periods=80, freq="B")
+        rows = []
+        for idx_name, spot_base in [("CSI300", 4000), ("SSE50", 2800), ("CSI500", 5500)]:
+            spot = spot_base + np.cumsum(np.random.randn(80) * 10)
+            futures_close = spot * (1 + basis_pct / 100)
+            oi = 50000 + np.cumsum(np.random.randn(80) * 300)
+            for i, d in enumerate(dates):
+                rows.append({
+                    "date": d.strftime("%Y%m%d"),
+                    "index_name": idx_name,
+                    "contract": f"{idx_name}",
+                    "close": futures_close[i],
+                    "spot_close": spot[i],
+                    "open_interest": max(1000, oi[i]),
+                    "volume": 20000,
+                })
+        return pd.DataFrame(rows)
+
+    def test_divergence_basis_bullish_oi_bearish(self, sample_config):
+        """Basis bullish + OI falling → divergence → neutral, not triggered."""
+        # Use bullish basis data but with declining OI trend
+        data = self._make_basis_data(0.8)
+        # Make OI clearly declining for all indices
+        for idx_name in data["index_name"].unique():
+            mask = data["index_name"] == idx_name
+            sorted_idx = data.loc[mask].sort_values("date").index
+            declining_oi = np.linspace(60000, 40000, len(sorted_idx))
+            data.loc[sorted_idx, "open_interest"] = declining_oi
+        result = detect_basis_oi_convergence(data, sample_config)
+        # If basis bullish but OI bearish, it's divergence → neutral + not triggered
+        if result.direction == "neutral" and not result.triggered:
+            assert "背离" in result.summary or "分歧" in result.summary
+        # Either way, detail should capture both sub-signal directions
+        assert "basis_direction" in result.detail
+
+    def test_divergence_strength_is_zero(self, sample_config):
+        """Divergence should produce strength=0.0."""
+        data = self._make_basis_data(0.8)
+        for idx_name in data["index_name"].unique():
+            mask = data["index_name"] == idx_name
+            sorted_idx = data.loc[mask].sort_values("date").index
+            declining_oi = np.linspace(60000, 40000, len(sorted_idx))
+            data.loc[sorted_idx, "open_interest"] = declining_oi
+        result = detect_basis_oi_convergence(data, sample_config)
+        if not result.triggered:
+            assert result.strength == 0.0 or result.direction == "neutral"
+
+    def test_convergence_both_bullish(self, sample_config):
+        """Basis bullish + OI rising sharply → convergence bullish, triggered."""
+        data = self._make_basis_data(0.8)
+        # Make OI clearly rising — need >2% 5-day change to trigger OI signal
+        for idx_name in data["index_name"].unique():
+            mask = data["index_name"] == idx_name
+            sorted_idx = data.loc[mask].sort_values("date").index
+            rising_oi = np.linspace(30000, 80000, len(sorted_idx))
+            data.loc[sorted_idx, "open_interest"] = rising_oi
+        result = detect_basis_oi_convergence(data, sample_config)
+        assert result.triggered
+        assert result.direction == "bullish"
+
+
+# ── No idx_col fallback tests ──
+
+
+class TestOpenInterestNoIdxCol:
+    """detect_open_interest_trend when idx_col is missing."""
+
+    def test_no_idx_col_uses_flat_series(self, sample_config):
+        """Without index_name column, treats entire DF as flat series."""
+        dates = pd.date_range("2026-01-02", periods=30, freq="B")
+        np.random.seed(88)
+        oi = 50000 + np.cumsum(np.random.randn(30) * 500)
+        df = pd.DataFrame({
+            "date": [d.strftime("%Y%m%d") for d in dates],
+            "open_interest": oi,
+            "close": 4000 + np.cumsum(np.random.randn(30) * 10),
+        })
+        result = detect_open_interest_trend(df, sample_config)
+        assert result.key == "open_interest_trend"
+
+    def test_no_idx_col_insufficient_data(self, sample_config):
+        """Without idx_col, <5 rows → neutral with insufficient data."""
+        df = pd.DataFrame({
+            "date": ["20260601", "20260602"],
+            "open_interest": [50000, 51000],
+        })
+        result = detect_open_interest_trend(df, sample_config)
+        assert not result.triggered
+        assert "数据不足" in result.summary

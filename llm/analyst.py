@@ -164,8 +164,92 @@ def _generate_fallback(
     mg_triggered: int,
     resonance_triggered: int,
     margin_balance_亿: float = 0,
+    nb_signals: list | None = None,
+    margin_signals: list | None = None,
+    futures_signals: list | None = None,
+    resonance_results: list | None = None,
 ) -> str:
-    """Generate rule-based macro analysis when LLM is unavailable."""
+    """Generate rule-based macro analysis when LLM is unavailable.
+
+    Extracts precise metrics from signal ``detail`` dicts for richer
+    fallback content, matching the quality of LLM-generated analysis
+    as closely as possible without an API call.
+    """
+    # ── Extract precise metrics from signal details ──
+
+    def _find_signal(signals, key):
+        """Find a signal by key in a list of SignalResult / ResonanceResult."""
+        for s in (signals or []):
+            if getattr(s, "key", "") == key or getattr(s, "pattern", "") == key:
+                return s
+        return None
+
+    # Margin metrics
+    margin_buy_ratio = None
+    margin_balance_trend_pct = None
+    short_change_pct = None
+    margin_short_ratio = None
+    margin_short_ratio_change = None
+
+    buy_ratio_sig = _find_signal(margin_signals, "margin_buy_ratio")
+    if buy_ratio_sig and hasattr(buy_ratio_sig, "detail"):
+        margin_buy_ratio = buy_ratio_sig.detail.get("estimated_ratio")
+        margin_buy_亿_val = buy_ratio_sig.detail.get("margin_buy_亿")
+
+    balance_sig = _find_signal(margin_signals, "margin_balance_trend")
+    if balance_sig and hasattr(balance_sig, "detail"):
+        margin_balance_trend_pct = balance_sig.detail.get("change_vs_ma20_pct")
+
+    short_sig = _find_signal(margin_signals, "short_trend")
+    if short_sig and hasattr(short_sig, "detail"):
+        short_change_pct = short_sig.detail.get("change_rate_pct")
+
+    msr_sig = _find_signal(margin_signals, "margin_short_ratio")
+    if msr_sig and hasattr(msr_sig, "detail"):
+        margin_short_ratio = msr_sig.detail.get("current_ratio")
+        margin_short_ratio_change = msr_sig.detail.get("change_5d_pct")
+
+    # Northbound metrics
+    nb_consecutive_days = None
+    nb_flow_direction = None
+    cumulative_ma_gap = None
+    cumulative_regime = None
+
+    flow_sig = _find_signal(nb_signals, "flow_trend")
+    if flow_sig and hasattr(flow_sig, "detail"):
+        nb_consecutive_days = flow_sig.detail.get("consecutive_days")
+
+    market_flow_sig = _find_signal(nb_signals, "market_flow_direction")
+    if market_flow_sig and hasattr(market_flow_sig, "detail"):
+        if market_flow_sig.detail.get("aligned"):
+            nb_flow_direction = "沪股通+深股通方向一致"
+        else:
+            sh_d = market_flow_sig.detail.get("sh_direction", "")
+            sz_d = market_flow_sig.detail.get("sz_direction", "")
+            nb_flow_direction = f"沪{sh_d}/深{sz_d}分歧"
+
+    cum_sig = _find_signal(nb_signals, "cumulative_trend")
+    if cum_sig and hasattr(cum_sig, "detail"):
+        cumulative_regime = cum_sig.detail.get("regime")
+        cumulative_ma_gap = cum_sig.detail.get("gap")
+
+    # Futures metrics
+    futures_basis_pct = None
+    futures_basis_count = None
+
+    basis_sig = _find_signal(futures_signals, "futures_basis")
+    if basis_sig and hasattr(basis_sig, "detail"):
+        futures_basis_pct = basis_sig.detail.get("avg_basis_pct")
+        futures_basis_count = basis_sig.detail.get("n_positive", 0)
+        n_total = basis_sig.detail.get("n_total", 3)
+
+    # Resonance
+    resonance_labels = []
+    for r in (resonance_results or []):
+        if getattr(r, "triggered", False):
+            resonance_labels.append(getattr(r, "label", ""))
+
+    # ── Build analysis ──
 
     # Determine regime
     if composite_score >= 65:
@@ -181,24 +265,77 @@ def _generate_fallback(
         regime = "防御"
         regime_detail = "资金面显著偏空，多项风险信号触发，建议降低仓位控制风险"
 
+    # Cross-validation: compare dimensions
+    cross_parts: list[str] = []
+    nb_bullish = sum(1 for s in (nb_signals or []) if getattr(s, "direction", "") == "bullish" and getattr(s, "triggered", False))
+    mg_bullish = sum(1 for s in (margin_signals or []) if getattr(s, "direction", "") == "bullish" and getattr(s, "triggered", False))
+
+    if nb_bullish >= 2 and mg_bullish >= 2:
+        cross_parts.append("北向与融资方向一致偏多，存在做多共振基础")
+    elif nb_bullish <= 1 and mg_bullish <= 1:
+        cross_parts.append("北向与融资均偏谨慎，市场缺乏明确方向")
+    else:
+        cross_parts.append("北向与融资信号存在方向分歧，多空博弈激烈")
+
+    if futures_basis_pct is not None and futures_basis_pct < -1.0:
+        cross_parts.append(f"期货深度贴水{futures_basis_pct:.1f}%，机构套保压力显著")
+    elif futures_basis_pct is not None and futures_basis_pct > 1.0:
+        cross_parts.append(f"期货升水{futures_basis_pct:.1f}%，机构情绪偏乐观")
+
     # Risk identification
     risks: list[str] = []
-    if mg_triggered >= 5:
+    if margin_buy_ratio is not None and margin_buy_ratio >= 0.15:
+        risks.append(f"融资买入比{margin_buy_ratio*100:.0f}%（≥15%警戒线），过度杠杆风险显著")
+    elif margin_buy_ratio is not None and margin_buy_ratio >= 0.10:
+        risks.append(f"融资买入比{margin_buy_ratio*100:.0f}%（≥10%偏热），杠杆情绪升温")
+    elif mg_triggered >= 5:
         risks.append("融资融券多项信号触发，杠杆情绪活跃，需关注过度杠杆风险")
-    if resonance_triggered > 0:
+
+    if resonance_triggered > 0 and resonance_labels:
+        risks.append(f"共振/背离信号触发：{'、'.join(resonance_labels)}，跨市场信号需重点关注")
+    elif resonance_triggered > 0:
         risks.append(f"共振/背离信号触发（{resonance_triggered}项），跨市场信号需重点关注")
+
     if margin_balance_亿 > 30000:
-        risks.append(f"融资余额{ margin_balance_亿:.0f}亿处于历史高位，去杠杆风险上升")
+        risks.append(f"融资余额{margin_balance_亿:.0f}亿处于历史高位，去杠杆风险上升")
+
+    if short_change_pct is not None and short_change_pct > 5:
+        risks.append(f"融券余额{short_change_pct:.1f}%加速增长，空头情绪升温")
+
+    if cumulative_regime and "加速流出" in str(cumulative_regime):
+        risks.append(f"北向累计趋势处于「{cumulative_regime}」状态，外资中期偏空")
+
+    if futures_basis_pct is not None:
+        n_total_val = basis_sig.detail.get("n_total", 3) if basis_sig else 3
+        if futures_basis_count is not None and futures_basis_count == 0 and n_total_val > 0:
+            risks.append("三大期指全线贴水，专业机构一致避险")
 
     risk_text = "\n".join(f"  - {r}" for r in risks) if risks else "  - 当前无显著极端风险信号"
 
+    # Signal overview
     nb_info = f"{nb_triggered}/6 触发" if nb_triggered else "无触发"
     mg_info = f"{mg_triggered}/6 触发" if mg_triggered else "无触发"
+
+    # Build enriched summary line
+    metric_details: list[str] = []
+    if margin_buy_ratio is not None:
+        metric_details.append(f"融资买入比{margin_buy_ratio*100:.0f}%{'（过热）' if margin_buy_ratio >= 0.15 else '（偏热）'}")
+    if margin_balance_trend_pct is not None:
+        metric_details.append(f"融资余额较MA20 {margin_balance_trend_pct:+.1f}%")
+    if nb_consecutive_days is not None and abs(nb_consecutive_days) > 0:
+        metric_details.append(f"北向连续{abs(nb_consecutive_days)}日{'净流入' if nb_consecutive_days > 0 else '净流出'}")
+    if futures_basis_pct is not None:
+        metric_details.append(f"期货{'贴水' if futures_basis_pct < 0 else '升水'}{abs(futures_basis_pct):.2f}%")
+
+    cross_text = "；".join(cross_parts) if cross_parts else "多维度信号无显著交叉"
 
     return (
         f"## 市场状态\n\n"
         f"当前资金面处于 **{regime}** 阶段。{regime_detail}。\n\n"
-        f"## 信号概况\n\n"
+        f"### 三维交叉验证\n\n"
+        f"{cross_text}。\n\n"
+        + (f"### 关键指标\n\n" + "\n".join(f"- {d}" for d in metric_details) + "\n\n" if metric_details else "")
+        + f"## 信号概况\n\n"
         f"- 北向资金：{nb_info}\n"
         f"- 融资融券：{mg_info}\n"
         f"- 综合评分：{composite_score:.0f}/100（{composite_label}）\n\n"
@@ -208,7 +345,7 @@ def _generate_fallback(
         f"- 短线：{'减少操作频率，等待信号明朗' if composite_score < 45 else '关注强势板块，快进快出'}\n"
         f"- 中线：{'控制仓位，等待右侧确认信号' if composite_score < 55 else '可适度参与，设好止盈止损'}\n"
         f"- 长线：{'分批布局优质标的，利用调整建仓' if composite_score >= 35 else '暂停加仓，等待系统性风险释放'}\n\n"
-        f"> 此为规则引擎自动生成的基础分析，完整分析需配置 LLM 后运行。"
+        f"> 此为规则引擎自动生成的基础分析（含精确指标提取），完整分析需配置 LLM 后运行。"
     )
 
 
@@ -322,6 +459,10 @@ class LLMAnalyst:
                 composite_score, composite_label,
                 nb_triggered, mg_triggered, res_triggered,
                 margin_balance_亿,
+                nb_signals=nb_signals,
+                margin_signals=margin_signals,
+                futures_signals=futures_signals,
+                resonance_results=resonance_results,
             )
             return fallback, "fallback", self._model
 
@@ -333,6 +474,11 @@ class LLMAnalyst:
             )
             text_parts: list[str] = []
             for block in resp.content:
+                # Skip DeepSeek thinking blocks (content_block_delta type)
+                if hasattr(block, "type") and getattr(block, "type", "") in (
+                    "thinking", "thinking_delta", "redacted_thinking",
+                ):
+                    continue
                 if hasattr(block, "text") and block.text:
                     text_parts.append(block.text)
             text = "".join(text_parts).strip()
@@ -343,6 +489,10 @@ class LLMAnalyst:
                     composite_score, composite_label,
                     nb_triggered, mg_triggered, res_triggered,
                     margin_balance_亿,
+                    nb_signals=nb_signals,
+                    margin_signals=margin_signals,
+                    futures_signals=futures_signals,
+                    resonance_results=resonance_results,
                 )
                 return fallback, "fallback", self._model
 
@@ -355,5 +505,9 @@ class LLMAnalyst:
                 composite_score, composite_label,
                 nb_triggered, mg_triggered, res_triggered,
                 margin_balance_亿,
+                nb_signals=nb_signals,
+                margin_signals=margin_signals,
+                futures_signals=futures_signals,
+                resonance_results=resonance_results,
             )
             return fallback, "fallback", self._model

@@ -273,3 +273,287 @@ def backtest_summary_table(result: BacktestResult) -> str:
         f"| ICIR | {result.icir:.4f} |\n"
         f"| Hit Rate | {result.hit_rate:.1%} |\n"
     )
+
+
+# ------------------------------------------------------------------
+# Rolling window stability analysis
+# ------------------------------------------------------------------
+
+
+@dataclass
+class RollingICResult:
+    """Rolling-window IC stability metrics."""
+    window_size: int
+    step_size: int
+    n_windows: int
+    ic_mean: float
+    ic_std: float
+    ic_min: float
+    ic_max: float
+    stability_ratio: float  # proportion of windows with IC > 0
+    ic_series: list[float]
+    window_end_dates: list[str]
+    summary: str
+
+
+def rolling_ic_analysis(
+    scores: list[float],
+    returns: list[float],
+    dates: list[str],
+    window_size: int = 60,
+    step_size: int = 20,
+) -> RollingICResult:
+    """Compute rolling-window IC to assess signal stability over time.
+
+    A consistently positive IC across windows indicates a robust signal.
+    High variance in IC suggests the signal may be regime-dependent.
+
+    Args:
+        scores: Composite scores for each period.
+        returns: Forward returns for each period.
+        dates: Evaluation dates.
+        window_size: Number of periods per rolling window.
+        step_size: Step between windows.
+
+    Returns:
+        RollingICResult with stability metrics.
+    """
+    n = len(scores)
+    if n < window_size:
+        return RollingICResult(
+            window_size=window_size, step_size=step_size,
+            n_windows=0, ic_mean=0.0, ic_std=0.0, ic_min=0.0, ic_max=0.0,
+            stability_ratio=0.0, ic_series=[], window_end_dates=[],
+            summary=f"数据不足（需要至少{window_size}个周期，当前{n}个）",
+        )
+
+    window_ics: list[float] = []
+    window_dates: list[str] = []
+
+    score_arr = np.array(scores)
+    ret_arr = np.array(returns)
+
+    for start in range(0, n - window_size + 1, step_size):
+        end = start + window_size
+        ic = _spearmanr(score_arr[start:end], ret_arr[start:end])
+        if not np.isnan(ic):
+            window_ics.append(float(ic))
+            window_dates.append(dates[end - 1] if end - 1 < len(dates) else "")
+
+    if not window_ics:
+        return RollingICResult(
+            window_size=window_size, step_size=step_size,
+            n_windows=0, ic_mean=0.0, ic_std=0.0, ic_min=0.0, ic_max=0.0,
+            stability_ratio=0.0, ic_series=[], window_end_dates=[],
+            summary="无法计算滚动IC",
+        )
+
+    ic_mean = float(np.mean(window_ics))
+    ic_std = float(np.std(window_ics, ddof=1)) if len(window_ics) > 1 else 0.0
+    ic_min = float(np.min(window_ics))
+    ic_max = float(np.max(window_ics))
+    stability_ratio = sum(1 for ic in window_ics if ic > 0) / len(window_ics)
+
+    # Stability assessment
+    if stability_ratio >= 0.8 and ic_std < 0.05:
+        quality = "高度稳定"
+    elif stability_ratio >= 0.6:
+        quality = "基本稳定"
+    elif stability_ratio >= 0.4:
+        quality = "不稳定 — 信号方向性随时间变化"
+    else:
+        quality = "不可靠 — 信号方向性频繁反转"
+
+    summary = (
+        f"滚动IC分析（窗口{window_size}期，步长{step_size}期）：\n"
+        f"窗口数: {len(window_ics)}  |  Mean IC: {ic_mean:.4f}  |  "
+        f"IC Range: [{ic_min:.4f}, {ic_max:.4f}]\n"
+        f"正向率: {stability_ratio:.1%}  |  稳定性: {quality}"
+    )
+
+    return RollingICResult(
+        window_size=window_size,
+        step_size=step_size,
+        n_windows=len(window_ics),
+        ic_mean=ic_mean,
+        ic_std=ic_std,
+        ic_min=ic_min,
+        ic_max=ic_max,
+        stability_ratio=round(stability_ratio, 4),
+        ic_series=window_ics,
+        window_end_dates=window_dates,
+        summary=summary,
+    )
+
+
+# ------------------------------------------------------------------
+# Per-detector IC analysis & weight optimization
+# ------------------------------------------------------------------
+
+
+@dataclass
+class DetectorICResult:
+    """IC analysis for a single detector."""
+    key: str
+    label: str
+    dimension: str       # "northbound" | "margin" | "futures"
+    current_weight: int
+    mean_ic: float
+    ic_ir: float
+    hit_rate: float
+    n_observations: int
+    suggested_weight: int
+    suggestion_reason: str
+
+
+def analyse_detector_weights(
+    nb_signals_list: list[list],
+    margin_signals_list: list[list],
+    futures_signals_list: list[list],
+    returns: list[float],
+    config: dict | None = None,
+) -> list[DetectorICResult]:
+    """Compute per-detector IC and suggest optimal weights.
+
+    For each detector, compute the Spearman rank IC between its strength
+    signal and forward returns, then suggest weight adjustments.
+
+    Args:
+        nb_signals_list: List of nb_signal lists, one per evaluation period.
+        margin_signals_list: List of margin_signal lists, one per period.
+        futures_signals_list: List of futures_signal lists, one per period.
+        returns: Forward returns for each period.
+        config: Config with current weights.
+
+    Returns:
+        List of DetectorICResult with per-detector metrics and suggestions.
+    """
+    cfg = config or {}
+
+    # Collect detectors from registries
+    detectors: list[dict] = []
+    for key, meta in NORTHBOUND_REGISTRY.items():
+        detectors.append({
+            "key": key, "label": meta.get("label", key),
+            "dimension": "northbound", "weight": meta.get("weight", 1),
+            "registry": NORTHBOUND_REGISTRY,
+        })
+    for key, meta in MARGIN_REGISTRY.items():
+        detectors.append({
+            "key": key, "label": meta.get("label", key),
+            "dimension": "margin", "weight": meta.get("weight", 1),
+            "registry": MARGIN_REGISTRY,
+        })
+    for key, meta in FUTURES_REGISTRY.items():
+        detectors.append({
+            "key": key, "label": meta.get("label", key),
+            "dimension": "futures", "weight": meta.get("weight", 1),
+            "registry": FUTURES_REGISTRY,
+        })
+
+    results: list[DetectorICResult] = []
+
+    for det in detectors:
+        # Extract strength values for this detector across all periods
+        strengths: list[float] = []
+        valid_returns: list[float] = []
+
+        signal_lists = {
+            "northbound": nb_signals_list,
+            "margin": margin_signals_list,
+            "futures": futures_signals_list,
+        }[det["dimension"]]
+
+        for i, sigs in enumerate(signal_lists):
+            if i >= len(returns):
+                break
+            for s in sigs:
+                if getattr(s, "key", "") == det["key"]:
+                    strengths.append(float(getattr(s, "strength", 0.0)))
+                    valid_returns.append(float(returns[i]))
+                    break
+
+        if len(strengths) < 5:
+            results.append(DetectorICResult(
+                key=det["key"], label=det["label"],
+                dimension=det["dimension"],
+                current_weight=det["weight"],
+                mean_ic=0.0, ic_ir=0.0, hit_rate=0.0,
+                n_observations=len(strengths),
+                suggested_weight=det["weight"],
+                suggestion_reason="观察不足",
+            ))
+            continue
+
+        # Compute IC
+        strength_arr = np.array(strengths)
+        ret_arr = np.array(valid_returns)
+        ic = _spearmanr(strength_arr, ret_arr)
+
+        # Compute IR via bootstrap sampling of IC
+        ic_samples: list[float] = []
+        n_bs = min(100, len(strengths))
+        rng = np.random.RandomState(42)
+        for _ in range(n_bs):
+            idx = rng.choice(len(strengths), size=len(strengths) // 2, replace=False)
+            sample_ic = _spearmanr(strength_arr[idx], ret_arr[idx])
+            if not np.isnan(sample_ic):
+                ic_samples.append(sample_ic)
+
+        ic_ir = abs(ic) / (np.std(ic_samples, ddof=1) + 1e-8) if ic_samples else 0.0
+
+        # Hit rate: direction match
+        hits = 0
+        for j in range(1, len(strengths)):
+            s_dir = strengths[j] - strengths[j - 1]
+            r_dir = valid_returns[j]
+            if s_dir * r_dir > 0:
+                hits += 1
+        hit_rate = hits / max(len(strengths) - 1, 1)
+
+        # Weight suggestion
+        current_w = det["weight"]
+        if abs(ic) > 0.05 and ic_ir > 0.5:
+            suggested_w = min(current_w + 1, 4)
+            reason = f"IC={ic:.3f}, ICIR={ic_ir:.2f} — 预测能力强，建议加权重"
+        elif abs(ic) > 0.02 and ic_ir > 0.2:
+            suggested_w = current_w
+            reason = f"IC={ic:.3f}, ICIR={ic_ir:.2f} — 预测能力一般，维持权重"
+        elif abs(ic) < 0.01 or ic_ir < 0.1:
+            suggested_w = max(current_w - 1, 0)
+            reason = f"IC={ic:.3f}, ICIR={ic_ir:.2f} — 预测能力弱，建议减权重"
+        else:
+            suggested_w = current_w
+            reason = f"IC={ic:.3f}, ICIR={ic_ir:.2f} — 边界信号，暂维持权重"
+
+        results.append(DetectorICResult(
+            key=det["key"],
+            label=det["label"],
+            dimension=det["dimension"],
+            current_weight=current_w,
+            mean_ic=round(float(ic), 4),
+            ic_ir=round(float(ic_ir), 2),
+            hit_rate=round(float(hit_rate), 4),
+            n_observations=len(strengths),
+            suggested_weight=suggested_w,
+            suggestion_reason=reason,
+        ))
+
+    # Sort by absolute IC descending
+    results.sort(key=lambda r: abs(r.mean_ic), reverse=True)
+    return results
+
+
+def detector_weight_summary_table(results: list[DetectorICResult]) -> str:
+    """Render a Markdown table summarizing per-detector IC results."""
+    lines = [
+        "| 检测器 | 维度 | 当前权重 | Mean IC | ICIR | Hit Rate | 建议权重 | 理由 |",
+        "|--------|------|----------|---------|------|----------|----------|------|",
+    ]
+    for r in results:
+        lines.append(
+            f"| {r.label} | {r.dimension} | {r.current_weight} | "
+            f"{r.mean_ic:+.4f} | {r.ic_ir:.2f} | {r.hit_rate:.1%} | "
+            f"{r.suggested_weight} | {r.suggestion_reason} |"
+        )
+    return "\n".join(lines)

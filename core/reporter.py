@@ -70,6 +70,7 @@ def generate_markdown_report(
     llm_model: str = "",
     futures_signals: list[SignalResult] | None = None,
     futures_data: pd.DataFrame | None = None,
+    industry_ranking: pd.DataFrame | None = None,
 ) -> str:
     """Generate the full Markdown daily report.
 
@@ -362,11 +363,25 @@ def generate_markdown_report(
     add("---")
     add("")
 
-    # ── 6. Sector flow ──
+    # ── 6. Sector flow (industry-neutral) ──
     add("## 七、板块资金流向")
     add("")
 
-    if not stock_info.empty and "industry" in stock_info.columns:
+    if industry_ranking is not None and not industry_ranking.empty:
+        add("**行业融资暴露排名** (市值中性化 Z-score，消除行业规模偏差):")
+        add("")
+        add("| 排名 | 行业 | 股票数 | 平均融资余额(亿) | 平均融资买入(亿) | Z-余额 | Z-买入 | 综合Z |")
+        add("|------|------|--------|-----------------|-----------------|--------|--------|-------|")
+        for _, row in industry_ranking.iterrows():
+            add(
+                f"| {int(row['rank'])} | {row['industry']} | {int(row['stock_count'])} | "
+                f"{_safe_fmt(row['avg_balance_亿'], '.1f')} | {_safe_fmt(row['avg_buy_亿'], '.1f')} | "
+                f"{_safe_fmt(row['z_balance'], '.2f')} | {_safe_fmt(row['z_buy'], '.2f')} | "
+                f"{_safe_fmt(row['composite_z'], '.2f')} |"
+            )
+        add("")
+        add("*Z-score > 0: 行业融资强度高于全市场平均；Z-score < 0: 低于平均。综合Z = (Z-余额 + Z-买入) / 2*")
+    elif not stock_info.empty and "industry" in stock_info.columns:
         industry_counts = stock_info["industry"].value_counts()
         add(f"**A股行业分布** (共{len(industry_counts)}个行业):")
         add("")
@@ -375,7 +390,7 @@ def generate_markdown_report(
         for ind, count in industry_counts.head(10).items():
             add(f"| {ind} | {count} |")
         add("")
-        add("*注: 个股北向持仓数据不可直接获取，板块资金流向基于汇总数据+行业分布推算。*")
+        add("*注: 个股融资明细数据不可用，显示基础行业分布。*")
     else:
         add("*行业分类数据不可用*")
     add("")
@@ -461,6 +476,25 @@ def _to_native(val):
     return val
 
 
+def _industry_ranking_to_list(df: pd.DataFrame | None) -> list[dict]:
+    """Convert industry ranking DataFrame to list of dicts for JSON."""
+    if df is None or df.empty:
+        return []
+    result = []
+    for _, row in df.iterrows():
+        result.append({
+            "rank": int(row["rank"]),
+            "industry": str(row["industry"]),
+            "stock_count": int(row["stock_count"]),
+            "avg_balance_亿": round(float(row["avg_balance_亿"]), 2),
+            "avg_buy_亿": round(float(row["avg_buy_亿"]), 2),
+            "z_balance": round(float(row["z_balance"]), 4),
+            "z_buy": round(float(row["z_buy"]), 4),
+            "composite_z": round(float(row["composite_z"]), 4),
+        })
+    return result
+
+
 def generate_json_output(
     trade_date: str,
     nb_signals: list[SignalResult],
@@ -480,6 +514,7 @@ def generate_json_output(
     llm_model: str = "",
     futures_signals: list[SignalResult] | None = None,
     futures_data: pd.DataFrame | None = None,
+    industry_ranking: pd.DataFrame | None = None,
 ) -> dict:
     """Generate structured JSON output for downstream consumption.
 
@@ -582,6 +617,7 @@ def generate_json_output(
             "bullish_count": sum(1 for s in futures_signals if s.direction == "bullish"),
             "bearish_count": sum(1 for s in futures_signals if s.direction == "bearish"),
         },
+        "industry_ranking": _industry_ranking_to_list(industry_ranking),
         "resonance": {
             "patterns": [resonance_to_dict(r) for r in resonance_results],
             "triggered_count": sum(1 for r in resonance_results if r.triggered),

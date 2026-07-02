@@ -202,6 +202,70 @@ class TestGenerateFallback:
         assert "长线" in text
         assert "规则引擎" in text
 
+    def test_extracts_margin_buy_ratio(self):
+        """Fallback should include precise margin buy ratio from signal detail."""
+        mg = [
+            _make_signal("margin_buy_ratio", "融资买入比", True, -0.8, "bearish",
+                         "融资买入3346亿，估算买入比18%（≥15%）"),
+        ]
+        mg[0].detail = {"estimated_ratio": 0.18, "margin_buy_亿": 3346}
+        text = _generate_fallback(45.0, "C", 2, 3, 0, 25000,
+                                  margin_signals=mg)
+        assert "18%" in text
+        assert "警戒线" in text
+
+    def test_extracts_futures_basis(self):
+        """Fallback should include futures basis when provided."""
+        fut = [
+            _make_signal("futures_basis", "期货基差", True, -1.0, "bearish",
+                         "期货贴水（-2.32%）"),
+        ]
+        fut[0].detail = {"avg_basis_pct": -2.32, "n_positive": 0, "n_total": 3}
+        text = _generate_fallback(40.0, "D", 3, 3, 0, 25000,
+                                  futures_signals=fut)
+        assert "贴水" in text
+
+    def test_extracts_flow_trend_consecutive_days(self):
+        """Fallback should mention consecutive northbound flow days."""
+        nb = [
+            _make_signal("flow_trend", "净流向趋势", False, 0.67, "bullish",
+                         "净流入2日"),
+        ]
+        nb[0].detail = {"consecutive_days": 2}
+        text = _generate_fallback(50.0, "C", 1, 2, 0, 25000,
+                                  nb_signals=nb)
+        assert "2日" in text
+
+    def test_extracts_resonance_labels(self):
+        """Fallback should name triggered resonance patterns."""
+        res = [
+            _make_resonance("bearish_resonance", "偏空共振", True, "bearish",
+                           "偏空共振触发", strength=-0.4),
+        ]
+        text = _generate_fallback(35.0, "D", 3, 4, 1, 25000,
+                                  resonance_results=res)
+        assert "偏空共振" in text
+
+    def test_cross_validation_section_present(self):
+        """Fallback should include a 三维交叉验证 section."""
+        text = _generate_fallback(50.0, "C", 2, 3, 0, 25000)
+        assert "三维交叉验证" in text
+
+    def test_key_metrics_section_when_data_available(self):
+        """Fallback should include 关键指标 when metrics are available."""
+        mg = [
+            _make_signal("margin_buy_ratio", "融资买入比", True, -0.8, "bearish", ""),
+        ]
+        mg[0].detail = {"estimated_ratio": 0.18}
+        text = _generate_fallback(45.0, "C", 2, 3, 0, 25000,
+                                  margin_signals=mg)
+        assert "关键指标" in text
+
+    def test_no_key_metrics_when_no_data(self):
+        """Fallback should skip 关键指标 when no signal lists provided."""
+        text = _generate_fallback(50.0, "C", 0, 0, 0, 10000)
+        assert "关键指标" not in text
+
 
 # ── LLMAnalyst tests ──
 

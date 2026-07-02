@@ -328,3 +328,115 @@ def rank_stocks_by_margin_buy(
     result = result[["rank", "symbol", "name", "industry", "margin_buy"]]
 
     return result
+
+
+# ------------------------------------------------------------------
+# Industry-neutral sector analysis
+# ------------------------------------------------------------------
+
+
+def compute_industry_neutral_ranking(
+    margin_detail: pd.DataFrame,
+    stock_info: pd.DataFrame,
+    top_n: int = 10,
+) -> pd.DataFrame:
+    """Rank industries by margin exposure, neutralized for industry size.
+
+    Computes per-industry z-scores for margin balance and margin buy,
+    then aggregates into an industry-level composite that adjusts for
+    the number of stocks in each industry (size-neutral).
+
+    Args:
+        margin_detail: Per-stock margin data with margin_balance / buy_on_margin_value.
+        stock_info: Stock info with symbol, industry columns.
+        top_n: Number of top industries to return.
+
+    Returns:
+        DataFrame with columns: industry, stock_count, avg_balance_亿,
+        avg_buy_亿, z_balance, z_buy, composite_z, rank.
+    """
+    if margin_detail.empty or stock_info.empty:
+        return pd.DataFrame()
+
+    # Column resolution
+    sym_col = None
+    bal_col = None
+    buy_col = None
+    for c in ["symbol", "股票代码"]:
+        if c in stock_info.columns and c in margin_detail.columns:
+            sym_col = c
+            break
+    for c in ["margin_balance", "融资余额"]:
+        if c in margin_detail.columns:
+            bal_col = c
+            break
+    for c in ["buy_on_margin_value", "融资买入额"]:
+        if c in margin_detail.columns:
+            buy_col = c
+            break
+
+    if sym_col is None or bal_col is None:
+        return pd.DataFrame()
+
+    # Get latest per-stock data
+    df = margin_detail.copy()
+    for col in [bal_col, buy_col] if buy_col else [bal_col]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "date" in df.columns:
+        df = df.sort_values("date")
+        df = df.groupby(sym_col).last().reset_index()
+
+    # Merge with industry info
+    info_cols = [sym_col, "industry"] if "industry" in stock_info.columns else [sym_col]
+    info_key = "symbol" if "symbol" in stock_info.columns else sym_col
+    df = df.merge(
+        stock_info[info_cols].rename(columns={info_key: sym_col}),
+        on=sym_col, how="left",
+    )
+    if "industry" not in df.columns:
+        return pd.DataFrame()
+
+    df = df.dropna(subset=["industry"])
+    df = df[df["industry"] != "未知"]
+
+    # Per-industry aggregates
+    industry_stats = df.groupby("industry").agg(
+        stock_count=(sym_col, "count"),
+        avg_balance_亿=(bal_col, lambda x: x.mean() / 1e8),
+        total_balance_亿=(bal_col, lambda x: x.sum() / 1e8),
+    ).reset_index()
+
+    if buy_col and buy_col in df.columns:
+        buy_stats = df.groupby("industry")[buy_col].agg(
+            avg_buy_亿=lambda x: x.mean() / 1e8,
+            total_buy_亿=lambda x: x.sum() / 1e8,
+        ).reset_index()
+        industry_stats = industry_stats.merge(buy_stats, on="industry", how="left")
+    else:
+        industry_stats["avg_buy_亿"] = 0.0
+        industry_stats["total_buy_亿"] = 0.0
+
+    # Z-score normalization (industry-neutral: adjust for size bias)
+    for metric in ["avg_balance_亿", "avg_buy_亿"]:
+        col = f"z_{metric.replace('avg_', '').replace('_亿', '')}"
+        vals = industry_stats[metric].values
+        if len(vals) >= 3 and np.std(vals) > 0:
+            industry_stats[col] = (vals - np.mean(vals)) / np.std(vals)
+        else:
+            industry_stats[col] = 0.0
+
+    # Composite z-score (equal weight balance + buy)
+    z_balance = industry_stats["z_balance"].fillna(0)
+    z_buy = industry_stats["z_buy"].fillna(0)
+    industry_stats["composite_z"] = (z_balance + z_buy) / 2.0
+
+    # Rank by composite z
+    industry_stats = industry_stats.sort_values("composite_z", ascending=False)
+    industry_stats["rank"] = range(1, len(industry_stats) + 1)
+
+    columns = [
+        "rank", "industry", "stock_count",
+        "avg_balance_亿", "avg_buy_亿",
+        "z_balance", "z_buy", "composite_z",
+    ]
+    return industry_stats.head(top_n)[columns].reset_index(drop=True)

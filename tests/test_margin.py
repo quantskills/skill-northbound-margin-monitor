@@ -310,3 +310,145 @@ class TestHelpers:
             assert s.direction == "bullish"
         for s in bearish:
             assert s.direction == "bearish"
+
+
+# ── Estimation bucket tests (no turnover data) ──
+
+
+class TestMarginBuyRatioEstimation:
+    """detect_margin_buy_ratio when total_turnover is unavailable."""
+
+    def test_estimation_bucket_dangerous(self, sample_config):
+        """Buy amount > 1500亿 → estimated ratio 18% → danger trigger."""
+        macro = pd.DataFrame({
+            "date": ["20260630"] * 2,
+            "market": ["sh", "sz"],
+            "buy_on_margin_value": [1000e8, 800e8],  # sum > 1500亿
+        })
+        result = detect_margin_buy_ratio(pd.DataFrame(), macro, sample_config)
+        assert result.triggered
+        assert result.direction == "bearish"
+        assert "估算买入比" in result.summary
+        assert result.detail.get("note", "").startswith("总成交额不可用")
+
+    def test_estimation_bucket_hot(self, sample_config):
+        """Buy amount > 1000亿 < 1500亿 → estimated ratio 12% → hot trigger."""
+        macro = pd.DataFrame({
+            "date": ["20260630"] * 2,
+            "market": ["sh", "sz"],
+            "buy_on_margin_value": [600e8, 500e8],  # 1100亿 total → 12%
+        })
+        result = detect_margin_buy_ratio(pd.DataFrame(), macro, sample_config)
+        assert result.triggered
+        assert result.direction == "bullish"
+
+    def test_estimation_bucket_neutral(self, sample_config):
+        """Buy amount < 200亿 → estimated ratio 2% → neutral."""
+        macro = pd.DataFrame({
+            "date": ["20260630"],
+            "market": ["sh"],
+            "buy_on_margin_value": [100e8],
+        })
+        result = detect_margin_buy_ratio(pd.DataFrame(), macro, sample_config)
+        assert not result.triggered
+        assert result.direction == "neutral"
+
+    def test_estimation_bucket_high_threshold(self, sample_config):
+        """Buy amount > 1000亿 → estimated ratio 12% → bullish (hot)."""
+        macro = pd.DataFrame({
+            "date": ["20260630"] * 2,
+            "market": ["sh", "sz"],
+            "buy_on_margin_value": [600e8, 600e8],  # 1200亿
+        })
+        result = detect_margin_buy_ratio(pd.DataFrame(), macro, sample_config)
+        assert result.triggered
+        assert result.direction == "bullish"
+
+    def test_estimation_with_custom_buckets(self):
+        """Custom estimation buckets from config."""
+        config = {
+            "margin": {
+                "buy_ratio_hot": 0.10,
+                "buy_ratio_dangerous": 0.15,
+                "buy_ratio_estimate_buckets": [
+                    [300, 0.20],  # Lower threshold for testing
+                ],
+            },
+        }
+        macro = pd.DataFrame({
+            "date": ["20260630"],
+            "market": ["sh"],
+            "buy_on_margin_value": [400e8],
+        })
+        result = detect_margin_buy_ratio(pd.DataFrame(), macro, config)
+        assert result.triggered
+        assert result.direction == "bearish"
+        assert result.detail["estimated_ratio"] == 0.2
+
+
+# ── No-date fallback tests ──
+
+
+class TestMarginNoDateFallback:
+    """Detectors when date column is missing."""
+
+    def test_balance_trend_no_date(self, sample_config):
+        """detect_margin_balance_trend without date column returns neutral."""
+        macro = pd.DataFrame({
+            "margin_balance": [14000, 14100, 14200, 14300, 14400] * 2,
+            "market": ["sh"] * 5 + ["sz"] * 5,
+        })
+        result = detect_margin_balance_trend(macro, sample_config)
+        assert not result.triggered
+        assert "无法按日期聚合" in result.summary
+
+    def test_balance_trend_no_date_no_market(self, sample_config):
+        """No date, no market column → uses iloc[-1]."""
+        macro = pd.DataFrame({
+            "margin_balance": [14000, 14100, 14200],
+        })
+        result = detect_margin_balance_trend(macro, sample_config)
+        assert not result.triggered
+        assert "无法按日期聚合" in result.summary
+
+    def test_balance_trend_no_date_empty_balance(self, sample_config):
+        """No date, all-NaN balance → returns neutral with empty message."""
+        macro = pd.DataFrame({
+            "margin_balance": [np.nan, np.nan],
+        })
+        result = detect_margin_balance_trend(macro, sample_config)
+        assert not result.triggered
+        assert "数据为空" in result.summary
+
+    def test_short_trend_no_date(self, sample_config):
+        """detect_short_trend without date column uses positional indexing."""
+        # Need large enough change to trigger: change > 10% triggers bearish
+        macro = pd.DataFrame({
+            "short_balance": [800, 810, 820, 830, 840, 850, 900, 1000],
+        })
+        result = detect_short_trend(macro, sample_config)
+        # 8 rows, change_days=5, current=1000, prev=830, change ≈ 20.5%
+        assert result.triggered
+        assert result.direction == "bearish"
+
+    def test_short_ratio_no_date(self, sample_config):
+        """detect_margin_short_ratio without date column uses positional indexing."""
+        # Create 30 rows so len(ratio) >= 21
+        balances = list(range(14000, 14030))
+        shorts = list(range(800, 770, -1))
+        macro = pd.DataFrame({
+            "margin_balance": balances,
+            "short_balance": shorts,
+        })
+        result = detect_margin_short_ratio(macro, sample_config)
+        # Should produce a valid signal (direction depends on trend)
+        assert result.key == "margin_short_ratio"
+
+    def test_buy_ratio_no_date_macro(self, sample_config):
+        """detect_margin_buy_ratio without date column sums all rows."""
+        macro = pd.DataFrame({
+            "buy_on_margin_value": [200e8, 300e8],
+        })
+        result = detect_margin_buy_ratio(pd.DataFrame(), macro, sample_config)
+        # Should estimate from 500亿 total
+        assert result.key == "margin_buy_ratio"

@@ -48,6 +48,7 @@ from .resonance import (
 )
 from .scorer import (
     compute_capital_flow_score,
+    compute_industry_neutral_ranking,
     rank_stocks_by_margin_balance,
     rank_stocks_by_margin_buy,
 )
@@ -244,6 +245,9 @@ class PanoramaPipeline:
         top_bal = rank_stocks_by_margin_balance(margin_detail, stock_info, top_n)
         top_buy = rank_stocks_by_margin_buy(margin_detail, stock_info, top_n)
 
+        # 9.1. Industry-neutral sector ranking
+        industry_ranking = compute_industry_neutral_ranking(margin_detail, stock_info, top_n=10)
+
         # 9.5. LLM macro analysis
         llm_analysis = ""
         llm_source = "none"
@@ -319,6 +323,7 @@ class PanoramaPipeline:
             top_margin_balance=top_bal,
             top_margin_buy=top_buy,
             stock_info=stock_info,
+            industry_ranking=industry_ranking,
             fetch_time=fetch_time,
             config=self._config,
             llm_analysis=llm_analysis,
@@ -341,6 +346,7 @@ class PanoramaPipeline:
             margin_macro=margin_macro,
             futures_data=futures_data,
             stock_info=stock_info,
+            industry_ranking=industry_ranking,
             config=self._config,
             llm_analysis=llm_analysis,
             llm_source=llm_source,
@@ -351,7 +357,10 @@ class PanoramaPipeline:
             trade_date, markdown, json_data, config=self._config,
         )
 
-        # 11. Result
+        # 11. Validate reports
+        self._validate_reports(md_path, json_path)
+
+        # 12. Result
         n_triggered = sum(1 for s in nb_signals if s.triggered)
         m_triggered = sum(1 for s in margin_signals if s.triggered)
         f_triggered = sum(1 for s in futures_signals if s.triggered)
@@ -387,6 +396,40 @@ class PanoramaPipeline:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _validate_reports(self, md_path: Path, json_path: Path) -> None:
+        """Run post-generation validation on the reports.
+
+        Issues are logged as warnings so they don't block pipeline completion,
+        but are visible in the log output for manual review.
+        """
+        try:
+            from scripts.validate_report import validate_md, validate_json
+        except ImportError:
+            return  # validation script not importable — skip silently
+
+        issues: list[str] = []
+        try:
+            md_text = md_path.read_text(encoding="utf-8-sig")
+            issues.extend(validate_md(md_text))
+        except Exception as e:
+            logger.warning("Report validation: cannot read markdown — %s", e)
+
+        try:
+            import json
+            json_data = json.loads(json_path.read_text(encoding="utf-8-sig"))
+            issues.extend(validate_json(json_data))
+        except Exception as e:
+            logger.warning("Report validation: cannot read JSON — %s", e)
+
+        if issues:
+            logger.warning("Report validation found %d issue(s):", len(issues))
+            for issue in issues[:10]:  # Cap to avoid log spam
+                logger.warning("  - %s", issue)
+            if len(issues) > 10:
+                logger.warning("  ... and %d more", len(issues) - 10)
+        else:
+            logger.info("Report validation: OK")
 
     def _empty_result(self, trade_date: str) -> PipelineResult:
         return PipelineResult(
