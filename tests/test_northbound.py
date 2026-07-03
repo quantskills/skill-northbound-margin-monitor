@@ -13,6 +13,7 @@ from core.northbound import (
     detect_holdings_change,
     detect_cumulative_trend,
     detect_market_flow_direction,
+    detect_flow_direction_trend,
     run_all_detectors,
     get_triggered_signals,
     get_bullish_signals,
@@ -245,12 +246,107 @@ class TestMarketFlowDirection:
         assert not result.triggered
 
 
+class TestFlowDirectionTrend:
+    def test_consecutive_inflow_triggers(self, sample_config, sample_nb_flow_history):
+        """10 days of bullish direction → should trigger."""
+        result = detect_flow_direction_trend(sample_nb_flow_history, sample_config)
+        assert result.triggered
+        assert result.direction == "bullish"
+        assert result.strength > 0
+        assert result.key == "flow_direction_trend"
+
+    def test_consecutive_outflow_triggers(self, sample_config, sample_nb_flow_history_bearish):
+        """10 days of bearish direction → should trigger."""
+        result = detect_flow_direction_trend(sample_nb_flow_history_bearish, sample_config)
+        assert result.triggered
+        assert result.direction == "bearish"
+        assert result.strength < 0
+
+    def test_below_threshold_no_trigger(self, sample_config, sample_nb_flow_history):
+        """Only 2 consecutive days → threshold is 3 → no trigger."""
+        # Take only the last 2 rows (both have direction_sum > 0)
+        short = sample_nb_flow_history.tail(2).copy()
+        result = detect_flow_direction_trend(short, sample_config)
+        assert not result.triggered
+
+    def test_insufficient_history(self, sample_config, sample_nb_flow_history_short):
+        """2 days total, both same direction, but below threshold."""
+        result = detect_flow_direction_trend(sample_nb_flow_history_short, sample_config)
+        assert not result.triggered
+
+    def test_empty_history(self, sample_config):
+        result = detect_flow_direction_trend(pd.DataFrame(), sample_config)
+        assert not result.triggered
+        assert result.direction == "neutral"
+
+    def test_none_history(self, sample_config):
+        result = detect_flow_direction_trend(None, sample_config)
+        assert not result.triggered
+        assert result.direction == "neutral"
+
+    def test_mixed_direction_no_trigger(self, sample_config):
+        """Direction changes mid-series → consecutive count resets."""
+        df = pd.DataFrame({
+            "date": ["20260615", "20260616", "20260617", "20260618", "20260619"],
+            "direction_sum": [1, 2, -1, 1, 1],
+            "direction_days": [1, 2, 1, 1, 1],
+        })
+        result = detect_flow_direction_trend(df, sample_config)
+        # Last 2 days are positive, consecutive=2 < threshold=3
+        assert not result.triggered
+
+    def test_strong_consensus_full_strength(self, sample_config):
+        """Both markets agree every day → consensus_factor=1.0."""
+        df = pd.DataFrame({
+            "date": [f"2026061{i}" for i in range(5, 10)],
+            "direction_sum": [2, 2, 2, 2, 2],
+            "direction_days": [2, 2, 2, 2, 2],
+        })
+        result = detect_flow_direction_trend(df, sample_config)
+        assert result.triggered
+        assert result.detail["consensus"] == "strong"
+        assert result.strength == 1.0  # 5/3=1.67 capped at 1.0 × 1.0
+
+    def test_moderate_consensus_reduced_strength(self, sample_config):
+        """One-market days → consensus_factor=0.7."""
+        df = pd.DataFrame({
+            "date": [f"2026061{i}" for i in range(5, 10)],
+            "direction_sum": [1, 1, 1, 1, 1],
+            "direction_days": [1, 1, 1, 1, 1],
+        })
+        result = detect_flow_direction_trend(df, sample_config)
+        assert result.triggered
+        assert result.detail["consensus"] == "moderate"
+        assert result.strength == pytest.approx(0.7, abs=0.01)  # 1.0 × 0.7
+
+    def test_zero_direction_returns_neutral(self, sample_config):
+        """Last day direction_sum=0 → neutral."""
+        df = pd.DataFrame({
+            "date": ["20260615", "20260616", "20260617"],
+            "direction_sum": [1, 0, 0],
+            "direction_days": [1, 0, 0],
+        })
+        result = detect_flow_direction_trend(df, sample_config)
+        assert not result.triggered
+        assert result.direction == "neutral"
+
+    def test_missing_direction_sum_column(self, sample_config):
+        """No direction_sum column → neutral."""
+        df = pd.DataFrame({
+            "date": ["20260615", "20260616"],
+            "some_other_col": [1, 2],
+        })
+        result = detect_flow_direction_trend(df, sample_config)
+        assert not result.triggered
+
+
 class TestRegistry:
-    def test_all_6_detectors_registered(self):
-        assert len(NORTHBOUND_REGISTRY) == 6
+    def test_all_7_detectors_registered(self):
+        assert len(NORTHBOUND_REGISTRY) == 7
         expected = {
             "flow_trend", "single_day_anomaly", "sector_preference",
             "holdings_change", "cumulative_trend", "market_flow_direction",
+            "flow_direction_trend",
         }
         assert set(NORTHBOUND_REGISTRY.keys()) == expected
 
@@ -263,9 +359,9 @@ class TestRegistry:
 
 
 class TestRunAllDetectors:
-    def test_returns_6_results(self, sample_nb_summary, sample_nb_flow, sample_stock_info, sample_config):
+    def test_returns_7_results(self, sample_nb_summary, sample_nb_flow, sample_stock_info, sample_config):
         results = run_all_detectors(sample_nb_summary, sample_nb_flow, sample_stock_info, sample_config)
-        assert len(results) == 6
+        assert len(results) == 7
 
     def test_active_detectors_filter(self, sample_nb_summary, sample_nb_flow, sample_stock_info, sample_config):
         results = run_all_detectors(
@@ -275,10 +371,20 @@ class TestRunAllDetectors:
         assert len(results) == 1
         assert results[0].key == "flow_trend"
 
+    def test_run_with_flow_history(self, sample_nb_summary, sample_nb_flow, sample_stock_info, sample_config, sample_nb_flow_history):
+        results = run_all_detectors(
+            sample_nb_summary, sample_nb_flow, sample_stock_info, sample_config,
+            nb_flow_history=sample_nb_flow_history,
+        )
+        assert len(results) == 7
+        flow_trend_results = [r for r in results if r.key == "flow_direction_trend"]
+        assert len(flow_trend_results) == 1
+        assert flow_trend_results[0].triggered
+
     def test_empty_data(self, sample_config):
         empty = pd.DataFrame()
         results = run_all_detectors(empty, empty, empty, sample_config)
-        assert len(results) == 6
+        assert len(results) == 7
         for r in results:
             assert not r.triggered
 

@@ -165,8 +165,8 @@ class TestGenerateFallback:
         text = _generate_fallback(70.0, "B", 4, 3, 1, 25000)
         assert "偏进攻" in text
         assert "B" in text
-        assert "4/6" in text
-        assert "3/6" in text
+        assert "4/7" in text
+        assert "3/7" in text
 
     def test_watchful_bullish_regime(self):
         text = _generate_fallback(55.0, "C+", 3, 2, 0, 20000)
@@ -459,5 +459,5 @@ class TestLLMAnalystAnalyze:
         ]
         text = _generate_fallback(45.0, "D", nb_triggered=2, mg_triggered=1,
                                   resonance_triggered=0, margin_balance_亿=15000)
-        assert "2/6" in text
-        assert "1/6" in text
+        assert "2/7" in text
+        assert "1/7" in text

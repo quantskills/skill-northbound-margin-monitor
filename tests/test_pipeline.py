@@ -202,7 +202,9 @@ class TestPipelineIntegration:
             composite_score=55.0,
             composite_grade="B",
             nb_triggered=2,
+            nb_total=7,
             margin_triggered=3,
+            margin_total=7,
             resonance_triggered=1,
         )
         assert r.trade_date == "20260630"

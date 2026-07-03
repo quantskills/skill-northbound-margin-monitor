@@ -69,6 +69,10 @@ Examples:
         help="Override output directory (default: from config.json).",
     )
     parser.add_argument(
+        "--summary", action="store_true",
+        help="LLM summary mode: generate a shorter 150-200 word analysis.",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug-level logging.",
     )
@@ -109,6 +113,7 @@ Examples:
         trade_date=args.date,
         use_cache=use_cache,
         top_n=args.top_n,
+        summary_mode=args.summary,
     )
 
     # Print summary
@@ -117,8 +122,8 @@ Examples:
     print(f"  Panorama Monitor — {result.trade_date}")
     print("=" * 60)
     print(f"  Composite Score:  {result.composite_score:.0f}/100 ({result.composite_grade})")
-    print(f"  Northbound:       {result.nb_triggered}/6 triggered")
-    print(f"  Margin:           {result.margin_triggered}/6 triggered")
+    print(f"  Northbound:       {result.nb_triggered}/{result.nb_total} triggered")
+    print(f"  Margin:           {result.margin_triggered}/{result.margin_total} triggered")
     print(f"  Resonance:        {result.resonance_triggered}/4 patterns")
     print("-" * 60)
     if result.md_path.exists():

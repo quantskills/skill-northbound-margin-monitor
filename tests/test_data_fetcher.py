@@ -812,3 +812,121 @@ class TestDateUtils:
             assert df.is_trading_day("20260630") is True
         finally:
             _remove_mock("panda_data")
+
+
+# ── Shenwan industry mapping tests ──
+
+
+class TestShenwanMapping:
+    """fetch_shenwan_mapping() — AKShare Shenwan industry classification."""
+
+    def _make_industry_list_df(self, names=None):
+        if names is None:
+            names = ["半导体", "银行", "食品饮料", "医药生物", "计算机"]
+        return pd.DataFrame({"板块名称": names})
+
+    def _make_cons_df(self, symbols):
+        """Create constituent DataFrame for a single industry."""
+        return pd.DataFrame({"代码": symbols, "名称": [f"股票{i}" for i in range(len(symbols))]})
+
+    def test_fetch_basic(self):
+        """Build mapping from 2 industries with 3+2 stocks."""
+        ind_list = self._make_industry_list_df(["半导体", "银行"])
+        cons_data = {
+            "半导体": self._make_cons_df(["000001.SZ", "000002.SZ", "000003.SZ"]),
+            "银行": self._make_cons_df(["600001.SH", "600002.SH"]),
+        }
+        mock_ak = _inject_mock_akshare(
+            stock_board_industry_name_em=ind_list,
+            stock_board_industry_cons_em=lambda symbol, **kw: cons_data.get(symbol, pd.DataFrame()),
+        )
+        try:
+            df = DataFetcher({"shenwan": {"enabled": True, "request_delay": 0}})
+            result = df.fetch_shenwan_mapping()
+            assert len(result) == 5
+            assert "symbol" in result.columns
+            assert "sw_industry" in result.columns
+            assert result.attrs["source"] == "akshare_shenwan"
+            assert result[result["symbol"] == "000001.SZ"]["sw_industry"].values[0] == "半导体"
+            assert result[result["symbol"] == "600001.SH"]["sw_industry"].values[0] == "银行"
+        finally:
+            _remove_mock("akshare")
+
+    def test_disabled_by_config(self):
+        """When shenwan.enabled=false, return empty DataFrame."""
+        mock_ak = _inject_mock_akshare()
+        try:
+            df = DataFetcher({"shenwan": {"enabled": False}})
+            result = df.fetch_shenwan_mapping()
+            assert result.empty
+        finally:
+            _remove_mock("akshare")
+
+    def test_empty_industry_list(self):
+        """AKShare returns empty industry list → empty result."""
+        mock_ak = _inject_mock_akshare(stock_board_industry_name_em=pd.DataFrame())
+        try:
+            df = DataFetcher({"shenwan": {"enabled": True, "request_delay": 0}})
+            result = df.fetch_shenwan_mapping()
+            assert result.empty
+        finally:
+            _remove_mock("akshare")
+
+    def test_industry_list_none(self):
+        """AKShare returns None → empty result."""
+        mock_ak = _inject_mock_akshare(stock_board_industry_name_em=None)
+        try:
+            df = DataFetcher({"shenwan": {"enabled": True, "request_delay": 0}})
+            result = df.fetch_shenwan_mapping()
+            assert result.empty
+        finally:
+            _remove_mock("akshare")
+
+    def test_industry_list_exception(self):
+        """AKShare raises exception → return empty DataFrame."""
+        mock_ak = _inject_mock_akshare(
+            stock_board_industry_name_em=MagicMock(side_effect=RuntimeError("Network error")),
+        )
+        try:
+            df = DataFetcher({"shenwan": {"enabled": True, "request_delay": 0}})
+            result = df.fetch_shenwan_mapping()
+            assert result.empty
+        finally:
+            _remove_mock("akshare")
+
+    def test_constituents_exception_per_industry(self):
+        """Individual industry constituent calls fail gracefully."""
+        ind_list = self._make_industry_list_df(["半导体", "银行"])
+        def _cons_side_effect(symbol, **kw):
+            if symbol == "半导体":
+                raise RuntimeError("timeout")
+            return self._make_cons_df(["600001.SH", "600002.SH"])
+        mock_ak = _inject_mock_akshare(
+            stock_board_industry_name_em=ind_list,
+            stock_board_industry_cons_em=_cons_side_effect,
+        )
+        try:
+            df = DataFetcher({"shenwan": {"enabled": True, "request_delay": 0}})
+            result = df.fetch_shenwan_mapping()
+            assert len(result) == 2  # Only 银行 mapped
+            assert result["sw_industry"].unique()[0] == "银行"
+        finally:
+            _remove_mock("akshare")
+
+    def test_deduplicate_symbols(self):
+        """Stock appearing in multiple industries keeps first assignment."""
+        ind_list = self._make_industry_list_df(["半导体", "银行"])
+        cons_data = {
+            "半导体": self._make_cons_df(["000001.SZ", "000002.SZ"]),
+            "银行": self._make_cons_df(["000001.SZ", "600001.SH"]),
+        }
+        mock_ak = _inject_mock_akshare(
+            stock_board_industry_name_em=ind_list,
+            stock_board_industry_cons_em=lambda symbol, **kw: cons_data.get(symbol, pd.DataFrame()),
+        )
+        try:
+            df = DataFetcher({"shenwan": {"enabled": True, "request_delay": 0}})
+            result = df.fetch_shenwan_mapping()
+            assert len(result) == 3  # 000001 appears once
+        finally:
+            _remove_mock("akshare")

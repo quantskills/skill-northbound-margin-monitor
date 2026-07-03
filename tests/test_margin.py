@@ -247,11 +247,12 @@ class TestMarginTypeDistribution:
 
 
 class TestRegistry:
-    def test_all_6_detectors_registered(self):
-        assert len(MARGIN_REGISTRY) == 6
+    def test_all_7_detectors_registered(self):
+        assert len(MARGIN_REGISTRY) == 7
         expected = {
             "margin_balance_trend", "margin_buy_ratio", "short_trend",
             "margin_heavy_stocks", "margin_short_ratio", "margin_type_distribution",
+            "margin_extreme_regime",
         }
         assert set(MARGIN_REGISTRY.keys()) == expected
 
@@ -263,14 +264,14 @@ class TestRegistry:
 
 
 class TestRunAllDetectors:
-    def test_returns_6_results(self, sample_margin_detail, sample_margin_macro, sample_stock_info, sample_config):
+    def test_returns_7_results(self, sample_margin_detail, sample_margin_macro, sample_stock_info, sample_config):
         results = run_all_detectors(sample_margin_detail, sample_margin_macro, sample_stock_info, sample_config)
-        assert len(results) == 6
+        assert len(results) == 7
 
     def test_empty_data(self, sample_config):
         empty = pd.DataFrame()
         results = run_all_detectors(empty, empty, empty, sample_config)
-        assert len(results) == 6
+        assert len(results) == 7
         for r in results:
             assert not r.triggered
 

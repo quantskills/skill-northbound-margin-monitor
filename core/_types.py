@@ -18,11 +18,12 @@ class SignalResult:
     detail: dict = field(default_factory=dict)
 
 
-def neutral_signal(key: str, label: str, summary: str = "") -> SignalResult:
+def neutral_signal(key: str, label: str, summary: str = "", detail: dict | None = None) -> SignalResult:
     """Create a neutral (non-triggered) SignalResult."""
     return SignalResult(
         key=key, label=label, triggered=False,
         strength=0.0, direction="neutral", summary=summary,
+        detail=detail or {},
     )
 
 

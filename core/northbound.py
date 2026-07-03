@@ -1,4 +1,4 @@
-"""North-bound capital flow signal detectors (6 signals, registry pattern).
+"""North-bound capital flow signal detectors (7 signals, registry pattern).
 
 Each detector analyses north-bound (沪深港通) data and returns a SignalResult
 with direction ("bullish"/"bearish"/"neutral"), strength (-1.0 to 1.0), and
@@ -20,6 +20,17 @@ import pandas as pd
 from ._types import SignalResult, neutral_signal, apply_signal_decay
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------
+# Data source labels
+# ------------------------------------------------------------------
+
+_SOURCE_MAP = {
+    "direct": "direct_nb",
+    "market_value": "market_value_diff",
+    "csi300": "csi300_proxy",
+}
 
 
 # ------------------------------------------------------------------
@@ -122,11 +133,11 @@ def detect_flow_trend(
     threshold = config.get("northbound", {}).get("consecutive_days_threshold", 3)
 
     if nb_summary.empty:
-        return neutral_signal(key, label, "无北向资金数据")
+        return neutral_signal(key, label, "无北向资金数据", detail={"data_source": "none"})
 
-    net_col, nb_summary, _ = _resolve_net_column(nb_summary)
+    net_col, nb_summary, source_type = _resolve_net_column(nb_summary)
     if net_col is None:
-        return neutral_signal(key, label, "无法计算净流向")
+        return neutral_signal(key, label, "无法计算净流向", detail={"data_source": "none"})
 
     # Sort by date and check consecutive direction
     df = nb_summary.sort_values("date", ascending=True).copy()
@@ -134,12 +145,13 @@ def detect_flow_trend(
 
     # Count consecutive days at the end with same direction
     recent = net_vals.dropna()
+    ds_label = _SOURCE_MAP.get(source_type, "unknown")
     if len(recent) < 2:
-        return neutral_signal(key, label, "数据不足")
+        return neutral_signal(key, label, "数据不足", detail={"data_source": ds_label})
 
     last_direction = 1 if recent.iloc[-1] > 0 else (-1 if recent.iloc[-1] < 0 else 0)
     if last_direction == 0:
-        return neutral_signal(key, label, "当日净流向为零")
+        return neutral_signal(key, label, "当日净流向为零", detail={"data_source": ds_label})
 
     consecutive = 1
     for i in range(len(recent) - 2, -1, -1):
@@ -156,6 +168,7 @@ def detect_flow_trend(
     desc = "净流入" if last_direction > 0 else "净流出"
 
     detail = {
+        "data_source": ds_label,
         "consecutive_days": consecutive,
         "threshold": threshold,
         "direction_desc": desc,
@@ -192,17 +205,18 @@ def detect_single_day_anomaly(
     z_threshold = config.get("northbound", {}).get("anomaly_zscore_threshold", 2.0)
 
     if nb_summary.empty:
-        return neutral_signal(key, label, "无北向资金数据")
+        return neutral_signal(key, label, "无北向资金数据", detail={"data_source": "none"})
 
-    net_col, nb_summary, _ = _resolve_net_column(nb_summary)
+    net_col, nb_summary, source_type = _resolve_net_column(nb_summary)
     if net_col is None:
-        return neutral_signal(key, label, "无法计算净流向")
+        return neutral_signal(key, label, "无法计算净流向", detail={"data_source": "none"})
 
     df = nb_summary.sort_values("date", ascending=True)
     net_vals = pd.to_numeric(df[net_col], errors="coerce").dropna()
 
+    ds_label = _SOURCE_MAP.get(source_type, "unknown")
     if len(net_vals) < 21:
-        return neutral_signal(key, label, f"数据不足（仅{len(net_vals)}日）")
+        return neutral_signal(key, label, f"数据不足（仅{len(net_vals)}日）", detail={"data_source": ds_label})
 
     today = net_vals.iloc[-1]
     history = net_vals.iloc[-61:-1]  # up to 60 days before today
@@ -212,7 +226,7 @@ def detect_single_day_anomaly(
     mu = history.mean()
     sigma = history.std()
     if sigma == 0 or pd.isna(sigma):
-        return neutral_signal(key, label, "波动率为零，无法计算Z-score")
+        return neutral_signal(key, label, "波动率为零，无法计算Z-score", detail={"data_source": ds_label})
 
     z_score = (today - mu) / sigma
     triggered = abs(z_score) >= z_threshold
@@ -221,6 +235,7 @@ def detect_single_day_anomaly(
 
     desc = "大幅净流入" if z_score > 0 else "大幅净流出"
     detail = {
+        "data_source": ds_label,
         "today_net": float(today),
         "mean_60d": float(mu),
         "std_60d": float(sigma),
@@ -258,10 +273,10 @@ def detect_sector_preference(
     label = "板块偏好"
 
     if nb_summary.empty:
-        return neutral_signal(key, label, "无北向资金数据")
+        return neutral_signal(key, label, "无北向资金数据", detail={"data_source": "none"})
 
     if stock_info.empty or "industry" not in stock_info.columns:
-        return neutral_signal(key, label, "无行业分类数据，无法计算板块偏好")
+        return neutral_signal(key, label, "无行业分类数据，无法计算板块偏好", detail={"data_source": "none"})
 
     # Check for overall direction — try market_value first, then net_buy, then proxy
     df = nb_summary.sort_values("date", ascending=True)
@@ -272,11 +287,13 @@ def detect_sector_preference(
             break
 
     proxy_note = ""
+    sector_source = "none"
     if mv_col is not None:
         recent_mv = pd.to_numeric(df[mv_col].tail(10), errors="coerce")
         mv_usable = (recent_mv > 0).sum() >= 3
         if mv_usable:
             recent = recent_mv.dropna()
+            sector_source = "market_value_diff"
             if len(recent) >= 6:
                 recent_change = recent.iloc[-1] - recent.iloc[-6]
             else:
@@ -288,7 +305,8 @@ def detect_sector_preference(
     if mv_col is None:
         net_col, df_resolved, net_source = _resolve_net_column(df)
         if net_col is None:
-            return neutral_signal(key, label, "无法计算板块偏好")
+            return neutral_signal(key, label, "无法计算板块偏好", detail={"data_source": "none"})
+        sector_source = _SOURCE_MAP.get(net_source, "unknown")
         if net_source == "csi300":
             proxy_note = "（注：北向净买入数据不可用，方向基于沪深300替代指标）"
         recent_change = pd.to_numeric(df_resolved[net_col].tail(5), errors="coerce").sum()
@@ -298,16 +316,42 @@ def detect_sector_preference(
     top_industries = industry_counts.head(5).index.tolist()
 
     direction = "bullish" if recent_change > 0 else "bearish"
-    change_pct = abs(recent_change)
+    change_abs = abs(recent_change)
+
+    # Normalise change magnitude for threshold comparison
+    if mv_col is not None and recent_mv is not None:
+        recent_mv_vals = pd.to_numeric(recent_mv, errors="coerce").dropna()
+        if len(recent_mv_vals) > 0 and recent_mv_vals.iloc[-1] > 0:
+            change_pct = change_abs / recent_mv_vals.iloc[-1]
+        else:
+            change_pct = 0.0
+    else:
+        # No market_value — estimate from net flow data itself.
+        # The net_col/dataset_resolved variables are set in the mv_col-is-None
+        # branch above; use the full net_buy series as denominator.
+        flow_col = net_col if net_col is not None else "net_buy_amount"
+        df_flow = df_resolved if df_resolved is not None else df
+        flow_vals = pd.to_numeric(df_flow[flow_col], errors="coerce").dropna()
+        avg_daily = flow_vals.abs().mean() if len(flow_vals) > 0 else 0
+        change_pct = change_abs / max(1.0, avg_daily) if avg_daily > 0 else 0.0
 
     detail = {
+        "data_source": sector_source,
         "overall_direction": "净流入" if recent_change > 0 else "净流出",
+        "change_abs": round(float(change_abs), 2),
+        "change_pct": round(float(change_pct * 100), 2),
         "top_industries_by_count": top_industries,
         "note": "板块偏好基于行业分布+汇总流向推算，非直接持仓数据",
     }
+    if proxy_note:
+        detail["proxy_note"] = proxy_note
 
-    triggered = abs(change_pct) > 0
+    # Only trigger on meaningful change (>0.5% relative or CSI300 proxy with caution)
+    min_threshold = 0.003 if proxy_note else 0.005  # 0.3% proxy / 0.5% direct
+    triggered = change_pct > min_threshold
     strength = 0.5 if triggered else 0.0
+    if proxy_note and triggered:
+        strength = 0.3  # reduced confidence when using CSI300 proxy
     if direction == "bearish":
         strength = -strength
 
@@ -344,7 +388,7 @@ def detect_holdings_change(
     top_n = config.get("northbound", {}).get("top_n_holdings", 20)
 
     if nb_summary.empty:
-        return neutral_signal(key, label, "无北向资金数据")
+        return neutral_signal(key, label, "无北向资金数据", detail={"data_source": "none"})
 
     df = nb_summary.sort_values("date", ascending=True)
 
@@ -355,11 +399,11 @@ def detect_holdings_change(
             break
 
     if mv_col is None:
-        return neutral_signal(key, label, "无持仓市值数据")
+        return neutral_signal(key, label, "无持仓市值数据", detail={"data_source": "none"})
 
     recent = pd.to_numeric(df[mv_col], errors="coerce").dropna()
     if len(recent) < 6:
-        return neutral_signal(key, label, "市值数据不足")
+        return neutral_signal(key, label, "市值数据不足", detail={"data_source": "market_value_diff"})
 
     current_mv = recent.iloc[-1]
     short_change = recent.iloc[-1] - recent.iloc[-6]
@@ -375,6 +419,7 @@ def detect_holdings_change(
     triggered = abs(change_pct_5d) > threshold
 
     detail = {
+        "data_source": "market_value_diff",
         "current_market_value_亿元": round(float(current_mv) / 1e8, 2) if current_mv > 1e6 else round(float(current_mv), 2),
         "change_5d": round(float(short_change), 2),
         "change_20d": round(float(med_change), 2) if len(recent) >= 21 else None,
@@ -421,18 +466,19 @@ def detect_cumulative_trend(
     ma_long = config.get("northbound", {}).get("ma_long_window", 60)
 
     if nb_summary.empty:
-        return neutral_signal(key, label, "无北向资金数据")
+        return neutral_signal(key, label, "无北向资金数据", detail={"data_source": "none"})
 
     net_col, nb_summary, net_source = _resolve_net_column(nb_summary)
     if net_col is None:
-        return neutral_signal(key, label, "无法计算累计趋势")
+        return neutral_signal(key, label, "无法计算累计趋势", detail={"data_source": "none"})
 
     df = nb_summary.sort_values("date", ascending=True)
     net_vals = pd.to_numeric(df[net_col], errors="coerce").fillna(0.0)
     cum_net = net_vals.cumsum()
 
     if len(cum_net) < ma_long:
-        return neutral_signal(key, label, f"数据不足（需≥{ma_long}日，当前{len(cum_net)}日）")
+        return neutral_signal(key, label, f"数据不足（需≥{ma_long}日，当前{len(cum_net)}日）",
+                              detail={"data_source": _SOURCE_MAP.get(net_source, "unknown")})
 
     ma20 = cum_net.rolling(ma_short).mean()
     ma60 = cum_net.rolling(ma_long).mean()
@@ -478,7 +524,7 @@ def detect_cumulative_trend(
         "regime": regime,
         "ma_short_window": ma_short,
         "ma_long_window": ma_long,
-        "net_source": net_source,
+        "data_source": _SOURCE_MAP.get(net_source, "unknown"),
     }
 
     # Format summary based on data source
@@ -524,7 +570,7 @@ def detect_market_flow_direction(
     label = "市场流向"
 
     if nb_flow.empty:
-        return neutral_signal(key, label, "无市场流向数据")
+        return neutral_signal(key, label, "无市场流向数据", detail={"data_source": "none"})
 
     # Detect columns by name (with fallback to positional)
     sector_col = None
@@ -602,6 +648,7 @@ def detect_market_flow_direction(
     both_out = sh_dir == -1 and sz_dir == -1
 
     detail = {
+        "data_source": "akshare_eastmoney",
         "sh_direction": "流入" if sh_dir == 1 else ("流出" if sh_dir == -1 else "持平"),
         "sz_direction": "流入" if sz_dir == 1 else ("流出" if sz_dir == -1 else "持平"),
         "aligned": aligned,
@@ -636,15 +683,284 @@ def detect_market_flow_direction(
 
 
 # ------------------------------------------------------------------
+# Detector 7: Flow Direction Trend (流向趋势 — 基于累积方向历史)
+# ------------------------------------------------------------------
+
+
+def detect_flow_direction_trend(
+    nb_flow_history: pd.DataFrame,
+    config: dict,
+) -> SignalResult:
+    """Detect consecutive-day flow direction trend from accumulated nb_flow history.
+
+    Uses the daily direction signal (+1 inflow, -1 outflow) aggregated
+    across SH+SZ markets. This provides an independent directional signal
+    based on actual northbound flow direction data, replacing the broken
+    ``net_buy_amount`` column.
+
+    Args:
+        nb_flow_history: Accumulated history from ``FlowAccumulator.get_direction_series()``.
+            Expected columns: date, direction_sum, direction_days,
+            adv_sum, dec_sum, flat_sum, index_chg_avg.
+        config: Full runtime config dict.
+
+    Returns:
+        SignalResult with key="flow_direction_trend".
+    """
+    key = "flow_direction_trend"
+    label = "流向趋势"
+    threshold = config.get("northbound", {}).get("consecutive_days_threshold", 3)
+
+    if nb_flow_history is None or nb_flow_history.empty:
+        return neutral_signal(key, label, "无流向历史数据（需累积≥2日）", detail={"data_source": "none"})
+
+    if "direction_sum" not in nb_flow_history.columns:
+        return neutral_signal(key, label, "流向数据格式异常", detail={"data_source": "none"})
+
+    df = nb_flow_history.sort_values("date", ascending=True)
+    directions = df["direction_sum"].dropna()
+
+    if len(directions) < 2:
+        return neutral_signal(key, label, "流向历史不足（需累积≥2日）", detail={"data_source": "nb_flow_accumulated"})
+
+    # Determine last day's net direction
+    last_val = directions.iloc[-1]
+    if last_val > 0:
+        last_dir = 1
+    elif last_val < 0:
+        last_dir = -1
+    else:
+        return neutral_signal(key, label, "当日沪深两市流向均衡（净方向=0）", detail={"data_source": "nb_flow_accumulated"})
+
+    # Count consecutive days with same direction
+    consecutive = 1
+    for i in range(len(directions) - 2, -1, -1):
+        val = directions.iloc[i]
+        if (val > 0 and last_dir > 0) or (val < 0 and last_dir < 0):
+            consecutive += 1
+        else:
+            break
+
+    triggered = consecutive >= threshold
+    base_strength = min(consecutive / max(threshold, 1), 1.0)
+
+    # Consensus strength: how many markets agreed on average
+    consensus_factor = 1.0
+    consensus_label = "strong"
+    if "direction_days" in df.columns:
+        recent_consensus = df["direction_days"].tail(consecutive)
+        avg_consensus = recent_consensus.mean() if len(recent_consensus) > 0 else 0
+        if avg_consensus >= 2.0:
+            consensus_factor = 1.0
+            consensus_label = "strong"
+        elif avg_consensus >= 1.0:
+            consensus_factor = 0.7
+            consensus_label = "moderate"
+        else:
+            consensus_factor = 0.5
+            consensus_label = "weak"
+
+    strength = base_strength * consensus_factor * last_dir
+    direction = "bullish" if last_dir > 0 else "bearish"
+
+    desc = "净流入" if last_dir > 0 else "净流出"
+
+    detail = {
+        "consecutive_days": consecutive,
+        "threshold": threshold,
+        "direction_desc": desc,
+        "consensus": consensus_label,
+        "direction_sum_last": float(last_val),
+        "data_source": "nb_flow_accumulated",
+    }
+
+    if triggered:
+        summary = (
+            f"北向连续{consecutive}日{desc}"
+            f"（两市共识={consensus_label}，阈值{threshold}日）"
+        )
+    else:
+        summary = (
+            f"北向{desc}{consecutive}日，未达阈值{threshold}日"
+            f"（共识={consensus_label}）"
+        )
+
+    return SignalResult(
+        key=key, label=label, triggered=triggered,
+        strength=round(strength, 4), direction=direction,
+        summary=summary, detail=detail,
+    )
+
+
+# ------------------------------------------------------------------
+# Merged flow trend detector (replaces flow_trend + flow_direction_trend)
+# ------------------------------------------------------------------
+
+def _detect_flow_trend_merged(
+    nb_summary: pd.DataFrame,
+    config: dict,
+    nb_flow_history: Optional[pd.DataFrame] = None,
+    *,
+    _key: str = "flow_trend",
+    _label: str = "净流向趋势",
+) -> SignalResult:
+    """Detect consecutive-day flow direction trend with smart data priority.
+
+    Priority chain:
+      1. **nb_flow_history** (FlowAccumulator, ≥10 dates) → ``direction_sum``
+         with consensus_factor weighting.
+      2. **nb_summary** via ``_resolve_net_column()`` fallback
+         (net_buy_amount → market_value diff → CSI300 proxy).
+      3. Neutral if nothing works.
+
+    Both ``"flow_trend"`` and ``"flow_direction_trend"`` registry keys
+    route through this function; the difference is whether
+    *nb_flow_history* is supplied by the pipeline.
+    """
+    key = _key
+    label = _label
+    threshold = config.get("northbound", {}).get("consecutive_days_threshold", 3)
+
+    # ── Priority 1: FlowAccumulator direction_sum ──
+    if nb_flow_history is not None and not nb_flow_history.empty:
+        df_fh = nb_flow_history.sort_values("date", ascending=True)
+        if "direction_sum" in df_fh.columns and len(df_fh) >= 10:
+            directions = df_fh["direction_sum"].dropna()
+            if len(directions) >= 2:
+                last_val = directions.iloc[-1]
+                if last_val > 0:
+                    last_dir = 1
+                elif last_val < 0:
+                    last_dir = -1
+                else:
+                    return neutral_signal(
+                        key, label, "当日沪深两市流向均衡（净方向=0）",
+                        detail={"data_source": "nb_flow_accumulated"},
+                    )
+
+                # Count consecutive same-direction days
+                consecutive = 1
+                for i in range(len(directions) - 2, -1, -1):
+                    v = directions.iloc[i]
+                    if (v > 0 and last_dir > 0) or (v < 0 and last_dir < 0):
+                        consecutive += 1
+                    else:
+                        break
+
+                triggered = consecutive >= threshold
+                base_strength = min(consecutive / max(threshold, 1), 1.0)
+
+                # Consensus factor from flow accumulator
+                consensus_factor = 1.0
+                consensus_label = "strong"
+                if "direction_days" in df_fh.columns:
+                    recent_consensus = df_fh["direction_days"].tail(consecutive)
+                    avg_consensus = recent_consensus.mean() if len(recent_consensus) > 0 else 0
+                    if avg_consensus >= 2.0:
+                        consensus_factor = 1.0
+                        consensus_label = "strong"
+                    elif avg_consensus >= 1.0:
+                        consensus_factor = 0.7
+                        consensus_label = "moderate"
+                    else:
+                        consensus_factor = 0.5
+                        consensus_label = "weak"
+
+                strength = base_strength * consensus_factor * last_dir
+                direction = "bullish" if last_dir > 0 else "bearish"
+                desc = "净流入" if last_dir > 0 else "净流出"
+
+                detail = {
+                    "data_source": "nb_flow_accumulated",
+                    "consecutive_days": consecutive,
+                    "threshold": threshold,
+                    "direction_desc": desc,
+                    "consensus": consensus_label,
+                    "direction_sum_last": float(last_val),
+                    "priority": "flow_history",
+                }
+
+                if triggered:
+                    summary = (
+                        f"北向连续{consecutive}日{desc}"
+                        f"（两市共识={consensus_label}，阈值{threshold}日）"
+                    )
+                else:
+                    summary = (
+                        f"北向{desc}{consecutive}日，未达阈值{threshold}日"
+                        f"（共识={consensus_label}）"
+                    )
+
+                return SignalResult(
+                    key=key, label=label, triggered=triggered,
+                    strength=round(strength, 4), direction=direction,
+                    summary=summary, detail=detail,
+                )
+
+    # ── Priority 2: _resolve_net_column fallback chain ──
+    if nb_summary is not None and not nb_summary.empty:
+        net_col, df_resolved, source_type = _resolve_net_column(nb_summary)
+        if net_col is not None:
+            df = df_resolved.sort_values("date", ascending=True)
+            net_vals = pd.to_numeric(df[net_col], errors="coerce")
+            recent = net_vals.dropna()
+            ds_label = _SOURCE_MAP.get(source_type, "unknown")
+            if len(recent) < 2:
+                return neutral_signal(key, label, "数据不足", detail={"data_source": ds_label})
+
+            last_dir = 1 if recent.iloc[-1] > 0 else (-1 if recent.iloc[-1] < 0 else 0)
+            if last_dir == 0:
+                return neutral_signal(key, label, "当日净流向为零", detail={"data_source": ds_label})
+
+            consecutive = 1
+            for i in range(len(recent) - 2, -1, -1):
+                d = 1 if recent.iloc[i] > 0 else (-1 if recent.iloc[i] < 0 else 0)
+                if d == last_dir:
+                    consecutive += 1
+                else:
+                    break
+
+            triggered = consecutive >= threshold
+            strength = min(consecutive / max(threshold, 1), 1.0) * last_dir
+            direction = "bullish" if last_dir > 0 else "bearish"
+            desc = "净流入" if last_dir > 0 else "净流出"
+
+            detail = {
+                "data_source": ds_label,
+                "consecutive_days": consecutive,
+                "threshold": threshold,
+                "direction_desc": desc,
+                "recent_values": recent.tail(consecutive).tolist(),
+                "priority": "net_column",
+            }
+
+            if triggered:
+                summary = f"连续{consecutive}日{desc}（阈值{threshold}日），趋势{'强化' if consecutive > threshold else '确立'}"
+            else:
+                summary = f"{desc}{consecutive}日，未达阈值{threshold}日"
+
+            return SignalResult(
+                key=key, label=label, triggered=triggered,
+                strength=round(strength, 4), direction=direction,
+                summary=summary, detail=detail,
+            )
+        else:
+            return neutral_signal(key, label, "无法计算净流向", detail={"data_source": "none"})
+
+    # ── Priority 3: No data ──
+    return neutral_signal(key, label, "无北向资金数据", detail={"data_source": "none"})
+
+
+# ------------------------------------------------------------------
 # Registry
 # ------------------------------------------------------------------
 
 NORTHBOUND_REGISTRY = {
     "flow_trend": {
-        "func": detect_flow_trend,
+        "func": _detect_flow_trend_merged,
         "weight": 3,
         "label": "净流向趋势",
-        "description": "连续N日净流入/流出方向检测",
+        "description": "连续N日净流入/流出方向检测（智能优先级：流向历史>净买入>市值差>CSI300代理）",
         "half_life_days": 20,
     },
     "single_day_anomaly": {
@@ -682,6 +998,13 @@ NORTHBOUND_REGISTRY = {
         "description": "沪股通+深股通方向一致/分歧",
         "half_life_days": 5,
     },
+    "flow_direction_trend": {
+        "func": _detect_flow_trend_merged,
+        "weight": 3,
+        "label": "流向趋势",
+        "description": "基于北向方向累积历史的连续趋势（与flow_trend合并，优先使用累积数据）",
+        "half_life_days": 20,
+    },
 }
 
 
@@ -691,6 +1014,7 @@ def run_all_detectors(
     stock_info: pd.DataFrame,
     config: dict,
     active_detectors: Optional[set[str]] = None,
+    nb_flow_history: Optional[pd.DataFrame] = None,
 ) -> list[SignalResult]:
     """Run all active northbound detectors.
 
@@ -700,6 +1024,8 @@ def run_all_detectors(
         stock_info: Stock detail info with industry column.
         config: Full runtime config dict.
         active_detectors: Set of detector keys to run. None = run all.
+        nb_flow_history: Accumulated flow direction history (optional).
+            Pass to enable the ``flow_direction_trend`` detector.
 
     Returns:
         List of SignalResult, one per active detector.
@@ -713,9 +1039,12 @@ def run_all_detectors(
         if entry is None:
             continue
         try:
-            # Each detector takes the data it needs
             func = entry["func"]
-            if key == "market_flow_direction":
+            if key == "flow_direction_trend":
+                result = func(nb_summary, config, nb_flow_history, _key=key, _label=entry["label"])
+            elif key == "flow_trend":
+                result = func(nb_summary, config, _key=key, _label=entry["label"])
+            elif key == "market_flow_direction":
                 result = func(nb_flow, config)
             elif key == "sector_preference":
                 result = func(nb_summary, stock_info, config)
@@ -726,7 +1055,7 @@ def run_all_detectors(
             results.append(result)
         except Exception:
             logger.exception("Northbound detector %s failed", key)
-            results.append(neutral_signal(key, entry["label"], f"检测器异常"))
+            results.append(neutral_signal(key, entry["label"], "检测器异常", detail={"data_source": "unknown"}))
     return results
 
 

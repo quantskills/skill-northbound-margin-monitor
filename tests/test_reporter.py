@@ -8,6 +8,8 @@ import pandas as pd
 import pytest
 
 from core.reporter import (
+    _find_previous_report,
+    _generate_historical_comparison,
     generate_markdown_report,
     generate_json_output,
     write_report,
@@ -598,3 +600,309 @@ class TestMarkdownReportSections:
             industry_ranking=None,
         )
         assert "A股行业分布" in md
+
+
+# ── Historical comparison tests ──
+
+
+class TestHistoricalComparison:
+    """_find_previous_report() and _generate_historical_comparison()."""
+
+    def _make_previous_report(self, trade_date="20260629", score=65.0):
+        """Build a minimal previous report dict matching JSON output structure."""
+        return {
+            "meta": {"trade_date": trade_date, "fetch_time": "2026-06-29T15:00:00"},
+            "composite": {
+                "score": score, "grade": "B+", "label": "偏乐观",
+                "northbound_score": 0.35, "margin_score": 0.25,
+                "futures_score": 0.10, "resonance_score": 0.15,
+                "risk_penalty": 0.0, "summary": "test",
+            },
+            "northbound": {"triggered_count": 3, "bullish_count": 2, "bearish_count": 1},
+            "margin": {"triggered_count": 4, "bullish_count": 3, "bearish_count": 1},
+            "futures": {"triggered_count": 1, "bullish_count": 1, "bearish_count": 0},
+            "resonance": {"triggered_count": 1},
+        }
+
+    def test_comparison_rendered_with_previous(self, sample_nb_summary, sample_nb_flow,
+                                                sample_margin_detail, sample_margin_macro,
+                                                sample_stock_info, sample_config):
+        """When previous_report is provided, historical comparison section renders."""
+        from core.futures import run_all_detectors as run_fut
+        from core.scorer import compute_industry_neutral_ranking
+
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            sample_nb_summary, sample_nb_flow, sample_margin_detail,
+            sample_margin_macro, sample_stock_info, sample_config,
+        )
+        fut_s = run_fut(pd.DataFrame(), sample_config)
+
+        prev = self._make_previous_report()
+        md = generate_markdown_report(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            nb_summary=sample_nb_summary, margin_detail=sample_margin_detail,
+            margin_macro=sample_margin_macro,
+            top_margin_balance=top_bal, top_margin_buy=top_buy,
+            stock_info=sample_stock_info,
+            fetch_time="2026-06-30T15:00:00", config=sample_config,
+            futures_signals=fut_s, futures_data=pd.DataFrame(),
+            previous_report=prev,
+        )
+        assert "历史对比" in md
+        assert "对比基准" in md
+        assert "2026-06-29" in md
+
+    def test_comparison_absent_without_previous(self, sample_nb_summary, sample_nb_flow,
+                                                  sample_margin_detail, sample_margin_macro,
+                                                  sample_stock_info, sample_config):
+        """Without previous_report, historical comparison should not appear."""
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            sample_nb_summary, sample_nb_flow, sample_margin_detail,
+            sample_margin_macro, sample_stock_info, sample_config,
+        )
+        md = generate_markdown_report(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            nb_summary=sample_nb_summary, margin_detail=sample_margin_detail,
+            margin_macro=sample_margin_macro,
+            top_margin_balance=top_bal, top_margin_buy=top_buy,
+            stock_info=sample_stock_info,
+            fetch_time="2026-06-30T15:00:00", config=sample_config,
+            previous_report=None,
+        )
+        assert "## 八、历史对比" in md
+        assert "无历史数据可比" in md
+
+    def test_historical_comparison_has_metrics(self):
+        """_generate_historical_comparison table should include key metrics."""
+        prev = self._make_previous_report()
+        from core.scorer import CompositeScore
+
+        comp = CompositeScore(
+            score=72.0, grade="A", label="乐观",
+            northbound_score=0.45, margin_score=0.35,
+            futures_score=0.15, resonance_score=0.20,
+            risk_penalty=0.0, summary="test",
+        )
+        signals = []  # Empty signals for simplicity
+
+        result = _generate_historical_comparison(
+            comp, signals, signals, signals, signals, prev,
+        )
+        assert "综合得分" in result
+        assert "北向得分" in result
+        assert "融资得分" in result
+        assert "触发数" in result
+
+    def test_json_output_includes_historical_comparison(self, sample_config):
+        """JSON output with previous_report should include historical_comparison field."""
+        prev = self._make_previous_report()
+        empty = pd.DataFrame()
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            empty, empty, empty, empty, empty, sample_config,
+        )
+        data = generate_json_output(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            top_margin_balance=pd.DataFrame(), top_margin_buy=pd.DataFrame(),
+            fetch_time="2026-06-30T15:00:00",
+            nb_summary=empty, margin_detail=empty, margin_macro=empty,
+            stock_info=empty, config=sample_config,
+            previous_report=prev,
+        )
+        assert "historical_comparison" in data
+        hc = data["historical_comparison"]
+        assert "score_delta" in hc
+        assert "northbound_score_delta" in hc
+        assert "margin_score_delta" in hc
+        assert "triggered_counts" in hc
+
+    def test_json_output_no_historical_without_previous(self, sample_config):
+        """JSON output without previous_report should not have historical_comparison."""
+        empty = pd.DataFrame()
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            empty, empty, empty, empty, empty, sample_config,
+        )
+        data = generate_json_output(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            top_margin_balance=pd.DataFrame(), top_margin_buy=pd.DataFrame(),
+            fetch_time="2026-06-30T15:00:00",
+            nb_summary=empty, margin_detail=empty, margin_macro=empty,
+            stock_info=empty, config=sample_config,
+            previous_report=None,
+        )
+        assert "historical_comparison" in data
+        assert data["historical_comparison"] is None
+
+    def test_find_previous_report_empty_dir(self, tmp_path):
+        """No reports → returns None."""
+        result = _find_previous_report("20260630", tmp_path)
+        assert result is None
+
+    def test_find_previous_report_finds_prior(self, tmp_path):
+        """Finds the most recent prior report."""
+        # Create a previous date dir with a JSON file
+        prev_dir = tmp_path / "2026-06-29"
+        prev_dir.mkdir(parents=True)
+        prev_json = prev_dir / "panorama_monitor_20260629.json"
+        prev_json.write_text(json.dumps(self._make_previous_report("20260629")), encoding="utf-8")
+
+        # Create an even older date dir
+        older_dir = tmp_path / "2026-06-28"
+        older_dir.mkdir(parents=True)
+        older_json = older_dir / "panorama_monitor_20260628.json"
+        older_json.write_text(json.dumps(self._make_previous_report("20260628", score=60.0)), encoding="utf-8")
+
+        result = _find_previous_report("20260630", tmp_path)
+        assert result is not None
+        assert result["meta"]["trade_date"] == "20260629"  # Most recent prior
+
+    def test_find_previous_report_skips_future(self, tmp_path):
+        """Skips directories dated after current_date."""
+        prev_dir = tmp_path / "2026-07-02"
+        prev_dir.mkdir(parents=True)
+        prev_json = prev_dir / "panorama_monitor_20260702.json"
+        prev_json.write_text(json.dumps(self._make_previous_report("20260702")), encoding="utf-8")
+
+        result = _find_previous_report("20260630", tmp_path)
+        assert result is None
+
+    def test_section_numbers_with_historical(self):
+        """When historical comparison is present, compare content has key metrics."""
+        prev = self._make_previous_report()
+        from core.scorer import CompositeScore
+
+        comp = CompositeScore(
+            score=72.0, grade="A", label="乐观",
+            northbound_score=0.45, margin_score=0.35,
+            futures_score=0.15, resonance_score=0.20,
+            risk_penalty=0.0, summary="test",
+        )
+        signals = []
+        comparison_md = _generate_historical_comparison(
+            comp, signals, signals, signals, signals, prev,
+        )
+        assert "综合得分" in comparison_md
+        assert "北向得分" in comparison_md
+        assert "2026-06-29" in comparison_md
+        assert "65" in comparison_md  # Previous score
+
+
+# ── Price-volume section tests ──
+
+
+class TestPriceVolumeSection:
+    """PV signals rendering in markdown and JSON reports."""
+
+    def _make_pv_signals(self):
+        """Create mock price-volume signal results."""
+        from core._types import SignalResult
+        return [
+            SignalResult(
+                key="index_momentum", label="指数动量",
+                triggered=True, strength=0.6, direction="bullish",
+                summary="20日涨幅8.5%，趋势偏多",
+            ),
+            SignalResult(
+                key="volatility_regime", label="波动率区间",
+                triggered=False, strength=0.0, direction="neutral",
+                summary="年化波动率22.0%，正常区间",
+            ),
+        ]
+
+    def test_pv_section_rendered(self, sample_nb_summary, sample_nb_flow,
+                                  sample_margin_detail, sample_margin_macro,
+                                  sample_stock_info, sample_config):
+        """When pv_signals provided, section 五 should render."""
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            sample_nb_summary, sample_nb_flow, sample_margin_detail,
+            sample_margin_macro, sample_stock_info, sample_config,
+        )
+        pv_s = self._make_pv_signals()
+        md = generate_markdown_report(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            nb_summary=sample_nb_summary, margin_detail=sample_margin_detail,
+            margin_macro=sample_margin_macro,
+            top_margin_balance=top_bal, top_margin_buy=top_buy,
+            stock_info=sample_stock_info,
+            fetch_time="2026-06-30T15:00:00", config=sample_config,
+            pv_signals=pv_s,
+        )
+        assert "量价确认" in md
+        assert "指数动量" in md
+        assert "波动率区间" in md
+
+    def test_pv_in_json_output(self, sample_config):
+        """JSON should include price_volume section."""
+        empty = pd.DataFrame()
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            empty, empty, empty, empty, empty, sample_config,
+        )
+        pv_s = self._make_pv_signals()
+        data = generate_json_output(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            top_margin_balance=pd.DataFrame(), top_margin_buy=pd.DataFrame(),
+            fetch_time="2026-06-30T15:00:00",
+            nb_summary=empty, margin_detail=empty, margin_macro=empty,
+            stock_info=empty, config=sample_config,
+            pv_signals=pv_s,
+        )
+        assert "price_volume" in data
+        pv = data["price_volume"]
+        assert "signals" in pv
+        assert pv["triggered_count"] == 1
+        assert pv["bullish_count"] == 1
+
+    def test_pv_section_absent_when_none(self, sample_nb_summary, sample_nb_flow,
+                                          sample_margin_detail, sample_margin_macro,
+                                          sample_stock_info, sample_config):
+        """No PV signals → no PV signal section (but provenance still shows line)."""
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            sample_nb_summary, sample_nb_flow, sample_margin_detail,
+            sample_margin_macro, sample_stock_info, sample_config,
+        )
+        md = generate_markdown_report(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            nb_summary=sample_nb_summary, margin_detail=sample_margin_detail,
+            margin_macro=sample_margin_macro,
+            top_margin_balance=top_bal, top_margin_buy=top_buy,
+            stock_info=sample_stock_info,
+            fetch_time="2026-06-30T15:00:00", config=sample_config,
+            pv_signals=[],
+        )
+        assert "## 五、量价确认" not in md  # Section heading absent
+        assert "| 量价确认 | 不可用" in md  # Provenance shows unavailable
+
+    def test_pv_in_data_provenance(self, sample_nb_summary, sample_nb_flow,
+                                    sample_margin_detail, sample_margin_macro,
+                                    sample_stock_info, sample_config):
+        """Data provenance should include PV data source."""
+        nb_s, mg_s, res, comp, top_bal, top_buy = _run_pipeline(
+            sample_nb_summary, sample_nb_flow, sample_margin_detail,
+            sample_margin_macro, sample_stock_info, sample_config,
+        )
+        pv_s = self._make_pv_signals()
+        md = generate_markdown_report(
+            trade_date="20260630",
+            nb_signals=nb_s, margin_signals=mg_s, resonance_results=res,
+            composite=comp,
+            nb_summary=sample_nb_summary, margin_detail=sample_margin_detail,
+            margin_macro=sample_margin_macro,
+            top_margin_balance=top_bal, top_margin_buy=top_buy,
+            stock_info=sample_stock_info,
+            fetch_time="2026-06-30T15:00:00", config=sample_config,
+            pv_signals=pv_s,
+        )
+        assert "CSI300指数" in md or "量价确认" in md

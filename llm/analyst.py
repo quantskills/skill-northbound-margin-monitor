@@ -28,10 +28,10 @@ PANORAMA_PROMPT_TEMPLATE = """你是一位资深 A 股宏观策略分析师，�
 ## 综合评分
 {composite_summary}
 
-## 北向资金信号（6项）
+## 北向资金信号（{nb_count}项）
 {nb_signals_table}
 
-## 融资融券信号（6项）
+## 融资融券信号（{mg_count}项）
 {mg_signals_table}
 
 ## 股指期货信号
@@ -53,6 +53,30 @@ PANORAMA_PROMPT_TEMPLATE = """你是一位资深 A 股宏观策略分析师，�
 7. 语言专业但不晦涩，用「可能」「倾向于」「值得关注」等概率化措辞，避免绝对判断。
 8. 控制在 400-600 字。"""
 
+SUMMARY_PROMPT_TEMPLATE = """你是一位资深 A 股宏观策略分析师。
+以下是今日资金面全景监控的核心信号摘要。请做一次精简研判。
+
+## 综合评分
+{composite_summary}
+
+## 核心信号摘要
+{nb_signals_table}
+
+{mg_signals_table}
+
+{futures_table}
+
+{resonance_table}
+
+## 关键宏观数据
+{macro_data}
+
+## 要求
+1. **市场状态**：用一句话判断当前资金面阶段（进攻/防守/观望）。
+2. **核心矛盾**：指出当前最关键的 1-2 个多空博弈焦点。
+3. **操作建议**：给出短线和中线各一句话建议。
+4. 语言精炼，控制在 150-200 字。"""
+
 
 def build_panorama_prompt(
     composite_score: float,
@@ -67,6 +91,7 @@ def build_panorama_prompt(
     margin_buy_亿: float = 0,
     top_industries: Optional[list[str]] = None,
     futures_signals: list | None = None,
+    summary_mode: bool = False,
 ) -> str:
     """Build the LLM prompt from panorama signal results.
 
@@ -83,6 +108,7 @@ def build_panorama_prompt(
         margin_buy_亿: Total margin buy amount in 亿 CNY.
         top_industries: Top industry names for context.
         futures_signals: List of futures SignalResult (optional).
+        summary_mode: If True, use shorter template for 150-200 word output.
 
     Returns:
         Formatted prompt string ready for the LLM.
@@ -143,13 +169,16 @@ def build_panorama_prompt(
         + f"- 重点行业：{industries_str}"
     )
 
-    return PANORAMA_PROMPT_TEMPLATE.format(
+    template = SUMMARY_PROMPT_TEMPLATE if summary_mode else PANORAMA_PROMPT_TEMPLATE
+    return template.format(
         composite_summary=composite_line,
         nb_signals_table=nb_table,
         mg_signals_table=mg_table,
         resonance_table=resonance_table,
         futures_table=futures_table,
         macro_data=macro_data,
+        nb_count=len(nb_signals),
+        mg_count=len(margin_signals),
     )
 
 
@@ -313,8 +342,10 @@ def _generate_fallback(
     risk_text = "\n".join(f"  - {r}" for r in risks) if risks else "  - 当前无显著极端风险信号"
 
     # Signal overview
-    nb_info = f"{nb_triggered}/6 触发" if nb_triggered else "无触发"
-    mg_info = f"{mg_triggered}/6 触发" if mg_triggered else "无触发"
+    nb_total = len(nb_signals) if nb_signals else 7
+    mg_total = len(margin_signals) if margin_signals else 7
+    nb_info = f"{nb_triggered}/{nb_total} 触发" if nb_triggered else "无触发"
+    mg_info = f"{mg_triggered}/{mg_total} 触发" if mg_triggered else "无触发"
 
     # Build enriched summary line
     metric_details: list[str] = []
@@ -370,6 +401,9 @@ class LLMAnalyst:
             self._config.get("llm", {}).get("max_tokens", 2048)
         )
         self._base_url = os.getenv("ANTHROPIC_BASE_URL") or None
+        self._timeout = float(self._config.get("llm", {}).get("timeout", 120.0))
+        self._max_retries_http = int(self._config.get("llm", {}).get("max_retries", 2))
+        self._max_retries_llm = int(self._config.get("llm", {}).get("llm_retries", 3))
         self._client = None
         self._api_key: Optional[str] = None
 
@@ -401,11 +435,71 @@ class LLMAnalyst:
                 "  - llm.api_key in config.json"
             )
 
-        client_kwargs: dict = {"api_key": self._api_key}
+        client_kwargs: dict = {
+            "api_key": self._api_key,
+            "timeout": self._timeout,
+            "max_retries": self._max_retries_http,
+        }
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
         self._client = anthropic.Anthropic(**client_kwargs)
         return self._client
+
+    def _call_llm_with_retry(self, prompt: str) -> str:
+        """Call the LLM API with exponential backoff retry on transient errors.
+
+        Retries on: RateLimitError, APIConnectionError, InternalServerError,
+        APITimeoutError. Gives up after ``self._max_retries_llm`` attempts.
+
+        Returns the raw response text, or raises the last exception.
+        """
+        from tenacity import (
+            retry,
+            stop_after_attempt,
+            wait_exponential,
+            retry_if_exception_type,
+        )
+        from anthropic import (
+            RateLimitError,
+            APIConnectionError,
+            InternalServerError,
+            APITimeoutError,
+        )
+
+        retryable = (RateLimitError, APIConnectionError, InternalServerError, APITimeoutError)
+
+        @retry(
+            stop=stop_after_attempt(self._max_retries_llm),
+            wait=wait_exponential(multiplier=2, min=2, max=10),
+            retry=retry_if_exception_type(retryable),
+            reraise=True,
+        )
+        def _call() -> str:
+            client = self.client
+            resp = client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text_parts: list[str] = []
+            blocks = getattr(resp, "content", None) or []
+            for block in blocks:
+                if hasattr(block, "type") and getattr(block, "type", "") in (
+                    "thinking", "thinking_delta", "redacted_thinking",
+                ):
+                    continue
+                if hasattr(block, "text") and block.text:
+                    text_parts.append(block.text)
+            text = "".join(text_parts).strip()
+            if not text and hasattr(resp, "text"):
+                raw_text = getattr(resp, "text", None)
+                if isinstance(raw_text, str) and raw_text.strip():
+                    text = raw_text.strip()
+            if not text:
+                raise RuntimeError("LLM returned empty response")
+            return text
+
+        return _call()
 
     def analyze(
         self,
@@ -421,11 +515,13 @@ class LLMAnalyst:
         margin_buy_億: float = 0,
         top_industries: Optional[list[str]] = None,
         futures_signals: list | None = None,
+        summary_mode: bool = False,
     ) -> tuple[str, str, str]:
         """Generate macro panorama analysis via LLM.
 
         Args:
             (all the signal + data inputs for the prompt)
+            summary_mode: If True, generate a shorter 150-200 word summary.
 
         Returns:
             (analysis_text, source, model) where source is "real" or "fallback"
@@ -448,6 +544,7 @@ class LLMAnalyst:
             margin_buy_亿=margin_buy_億,
             top_industries=top_industries,
             futures_signals=futures_signals,
+            summary_mode=summary_mode,
         )
 
         # Try API call
@@ -467,35 +564,7 @@ class LLMAnalyst:
             return fallback, "fallback", self._model
 
         try:
-            resp = client.messages.create(
-                model=self._model,
-                max_tokens=self._max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text_parts: list[str] = []
-            for block in resp.content:
-                # Skip DeepSeek thinking blocks (content_block_delta type)
-                if hasattr(block, "type") and getattr(block, "type", "") in (
-                    "thinking", "thinking_delta", "redacted_thinking",
-                ):
-                    continue
-                if hasattr(block, "text") and block.text:
-                    text_parts.append(block.text)
-            text = "".join(text_parts).strip()
-
-            if not text:
-                logger.warning("LLM returned empty response — using fallback")
-                fallback = _generate_fallback(
-                    composite_score, composite_label,
-                    nb_triggered, mg_triggered, res_triggered,
-                    margin_balance_亿,
-                    nb_signals=nb_signals,
-                    margin_signals=margin_signals,
-                    futures_signals=futures_signals,
-                    resonance_results=resonance_results,
-                )
-                return fallback, "fallback", self._model
-
+            text = self._call_llm_with_retry(prompt)
             logger.info("LLM analysis generated (%d chars, model=%s)", len(text), self._model)
             return text, "real", self._model
 

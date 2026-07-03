@@ -85,6 +85,7 @@ class CacheManager:
         stock_info_df: pd.DataFrame,
         northbound_flow_df: pd.DataFrame | None = None,
         futures_df: pd.DataFrame | None = None,
+        fetch_time: str = "",
     ) -> None:
         """Persist data to cache."""
         date_dir = self._root / trade_date
@@ -120,6 +121,8 @@ class CacheManager:
             "northbound_source": nb_source,
             "margin_source": mg_source,
         }
+        if fetch_time:
+            meta["fetch_time"] = fetch_time
         (date_dir / META_FILENAME).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -135,6 +138,57 @@ class CacheManager:
             except Exception:
                 logger.warning("Corrupt northbound_flow cache for %s", trade_date)
         return pd.DataFrame()
+
+    # -- Flow history (cumulative, not per-date) -------------------------
+
+    def save_nb_flow_history(self, df: pd.DataFrame) -> None:
+        """Save accumulated nb_flow history to cache root.
+
+        Writes to ``cache/nb_flow_history.parquet`` (a single cumulative file).
+        """
+        self._root.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(self._root / "nb_flow_history.parquet", index=False)
+        n_dates = df["date"].nunique() if "date" in df.columns else 0
+        logger.info("Flow history saved: %d rows, %d dates", len(df), n_dates)
+
+    def load_nb_flow_history(self) -> pd.DataFrame:
+        """Load accumulated nb_flow history from cache root.
+
+        Returns empty DataFrame if the file does not exist or is corrupt.
+        """
+        history_path = self._root / "nb_flow_history.parquet"
+        if not history_path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(history_path)
+        except Exception:
+            logger.warning("Corrupt nb_flow_history, needs rebuild")
+            return pd.DataFrame()
+
+    # -- HKEX supplement cache -------------------------------------------
+
+    def save_hkex(self, trade_date: str, df: pd.DataFrame) -> None:
+        """Save HKEX supplement data for a specific date."""
+        if df is None or df.empty:
+            return
+        date_dir = self._root / trade_date
+        date_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(date_dir / "hkex.parquet", index=False)
+        logger.info("HKEX data saved for %s: %d rows", trade_date, len(df))
+
+    def load_hkex(self, trade_date: str) -> pd.DataFrame:
+        """Load HKEX supplement data for *trade_date*.
+
+        Returns empty DataFrame if not found or corrupt.
+        """
+        hkex_path = self._root / trade_date / "hkex.parquet"
+        if not hkex_path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(hkex_path)
+        except Exception:
+            logger.warning("Corrupt HKEX cache for %s", trade_date)
+            return pd.DataFrame()
 
     def clear_old(self, keep_days: int = 30) -> int:
         """Remove cached dates older than *keep_days* calendar days.
@@ -163,6 +217,73 @@ class CacheManager:
             except ValueError:
                 continue
         return removed
+
+    # -- Shenwan industry mapping cache ---------------------------------
+
+    def save_sw_mapping(self, df: pd.DataFrame) -> None:
+        """Save Shenwan industry mapping to a persistent parquet file."""
+        self._root.mkdir(parents=True, exist_ok=True)
+        sw_path = self._root / "sw_industry_mapping.parquet"
+        df.to_parquet(sw_path, index=False)
+        logger.info("Shenwan mapping saved: %d rows", len(df))
+
+    def load_sw_mapping(self, max_age_days: int = 30) -> pd.DataFrame:
+        """Load cached Shenwan industry mapping if not expired.
+
+        Args:
+            max_age_days: Maximum age of the cached mapping file.
+
+        Returns:
+            DataFrame with symbol, sw_industry columns, or empty if expired/missing.
+        """
+        from datetime import datetime, timedelta
+
+        sw_path = self._root / "sw_industry_mapping.parquet"
+        if not sw_path.exists():
+            return pd.DataFrame()
+
+        mtime = datetime.fromtimestamp(sw_path.stat().st_mtime)
+        if datetime.now() - mtime > timedelta(days=max_age_days):
+            logger.info("Shenwan mapping cache expired (age=%d days)", (datetime.now() - mtime).days)
+            return pd.DataFrame()
+
+        try:
+            df = pd.read_parquet(sw_path)
+            logger.info("Shenwan mapping loaded from cache: %d rows", len(df))
+            return df
+        except Exception:
+            logger.warning("Corrupt Shenwan mapping cache, ignoring")
+            return pd.DataFrame()
+
+    # -- Shenwan offline backup (survives cache expiry) ------------------
+
+    def save_sw_backup(self, df: pd.DataFrame) -> None:
+        """Save Shenwan mapping to an offline backup that never expires.
+
+        Unlike ``save_sw_mapping`` (which has a 30-day expiry), this backup
+        persists indefinitely as a fallback when the API is unavailable.
+        """
+        self._root.mkdir(parents=True, exist_ok=True)
+        sw_backup_path = self._root / "shenwan_backup.parquet"
+        df.to_parquet(sw_backup_path, index=False)
+        logger.info("Shenwan backup saved: %d rows", len(df))
+
+    def load_sw_backup(self) -> pd.DataFrame:
+        """Load Shenwan mapping from offline backup (no expiry check).
+
+        Returns:
+            DataFrame with symbol, sw_industry columns, or empty if missing/corrupt.
+        """
+        sw_backup_path = self._root / "shenwan_backup.parquet"
+        if not sw_backup_path.exists():
+            return pd.DataFrame()
+        try:
+            df = pd.read_parquet(sw_backup_path)
+            logger.info("Shenwan backup loaded: %d rows", len(df))
+            return df
+        except Exception:
+            logger.warning("Corrupt Shenwan backup, ignoring")
+            return pd.DataFrame()
 
     @property
     def cached_dates(self) -> list[str]:

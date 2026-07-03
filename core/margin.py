@@ -33,6 +33,18 @@ def _resolve_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
     return None
 
 
+def _df_source(df: pd.DataFrame) -> str:
+    """Map DataFrame attrs source tag to standard data_source label."""
+    if df is None or df.empty:
+        return "none"
+    raw = df.attrs.get("source", "") if hasattr(df, "attrs") else ""
+    label_map = {
+        "pandadata": "pandadata",
+        "eastmoney": "akshare_eastmoney",
+    }
+    return label_map.get(raw, "unknown")
+
+
 # ------------------------------------------------------------------
 # Detector 1: Margin Balance Trend (融资余额趋势)
 # ------------------------------------------------------------------
@@ -53,7 +65,7 @@ def detect_margin_balance_trend(
     long_window = config.get("margin", {}).get("trend_long_window", 20)
 
     if margin_macro.empty:
-        return neutral_signal(key, label, "无融资宏观数据")
+        return neutral_signal(key, label, "无融资宏观数据", detail={"data_source": _df_source(margin_macro)})
 
     # Resolve balance column
     bal_col = _resolve_col(
@@ -61,7 +73,7 @@ def detect_margin_balance_trend(
     )
     if bal_col is None:
         # Try to compute from detail if available
-        return neutral_signal(key, label, "无融资余额字段")
+        return neutral_signal(key, label, "无融资余额字段", detail={"data_source": _df_source(margin_macro)})
 
     # Aggregate SH+SZ by date
     date_col = _resolve_col(margin_macro, "date", "日期")
@@ -69,7 +81,7 @@ def detect_margin_balance_trend(
         # Assume rows are in date order
         bal = pd.to_numeric(margin_macro[bal_col], errors="coerce").dropna()
         if bal.empty:
-            return neutral_signal(key, label, "融资余额数据为空")
+            return neutral_signal(key, label, "融资余额数据为空", detail={"data_source": _df_source(margin_macro)})
         # Use the latest values
         if "market" in margin_macro.columns:
             grouped = margin_macro.groupby("market")[bal_col].last()
@@ -79,13 +91,13 @@ def detect_margin_balance_trend(
     else:
         grouped = margin_macro.groupby(date_col)[bal_col].sum().sort_index()
         if len(grouped) < long_window:
-            return neutral_signal(key, label, f"数据不足（需≥{long_window}日，当前{len(grouped)}日）")
+            return neutral_signal(key, label, f"数据不足（需≥{long_window}日，当前{len(grouped)}日）", detail={"data_source": _df_source(margin_macro)})
         current = grouped.iloc[-1]
         ma5 = grouped.rolling(short_window).mean().iloc[-1]
         ma20 = grouped.rolling(long_window).mean().iloc[-1]
 
         if pd.isna(ma5) or pd.isna(ma20):
-            return neutral_signal(key, label, "均线计算失败")
+            return neutral_signal(key, label, "均线计算失败", detail={"data_source": _df_source(margin_macro)})
 
         prev = grouped.iloc[-2] if len(grouped) >= 2 else current
         change_1d = (current - prev) / prev * 100 if prev != 0 else 0
@@ -119,6 +131,7 @@ def detect_margin_balance_trend(
             strength = -0.6
 
         detail = {
+            "data_source": _df_source(margin_macro),
             "current_balance_亿": round(float(current) / 1e8, 2),
             "ma5_亿": round(float(ma5) / 1e8, 2),
             "ma20_亿": round(float(ma20) / 1e8, 2),
@@ -136,7 +149,7 @@ def detect_margin_balance_trend(
         )
 
     # Fallback: no date column, just report current state
-    return neutral_signal(key, label, "无法按日期聚合融资余额")
+    return neutral_signal(key, label, "无法按日期聚合融资余额", detail={"data_source": _df_source(margin_macro)})
 
 
 # ------------------------------------------------------------------
@@ -178,12 +191,14 @@ def detect_margin_buy_ratio(
                     total_buy = pd.to_numeric(latest_detail[detail_buy_col], errors="coerce").sum()
                 else:
                     total_buy = pd.to_numeric(margin_detail[detail_buy_col], errors="coerce").sum()
+                buy_source_df = margin_detail
             else:
-                return neutral_signal(key, label, "无融资买入额数据")
+                return neutral_signal(key, label, "无融资买入额数据", detail={"data_source": _df_source(margin_detail)})
         else:
-            return neutral_signal(key, label, "无融资买入额数据")
+            return neutral_signal(key, label, "无融资买入额数据", detail={"data_source": _df_source(margin_detail)})
     else:
         # Use latest date only to avoid summing all history
+        buy_source_df = margin_macro
         date_col = _resolve_col(margin_macro, "date", "日期")
         if date_col is not None:
             latest = margin_macro[date_col].max()
@@ -217,6 +232,7 @@ def detect_margin_buy_ratio(
                 break
 
         detail = {
+            "data_source": _df_source(buy_source_df),
             "margin_buy_亿": round(buy_amount_亿, 2),
             "estimated_ratio": round(ratio_estimate, 4),
             "note": "总成交额不可用，买入比为基于融资买入额的估算值",
@@ -248,9 +264,10 @@ def detect_margin_buy_ratio(
     if total_turnover > 0:
         buy_ratio = float(total_buy) / float(total_turnover)
     else:
-        return neutral_signal(key, label, "总成交额为零")
+        return neutral_signal(key, label, "总成交额为零", detail={"data_source": _df_source(buy_source_df)})
 
     detail = {
+        "data_source": _df_source(buy_source_df),
         "margin_buy_亿": round(float(total_buy) / 1e8, 2),
         "total_turnover_亿": round(float(total_turnover) / 1e8, 2),
         "buy_ratio": round(buy_ratio, 4),
@@ -302,13 +319,13 @@ def detect_short_trend(
     change_days = config.get("margin", {}).get("short_change_days", 5)
 
     if margin_macro.empty:
-        return neutral_signal(key, label, "无融券宏观数据")
+        return neutral_signal(key, label, "无融券宏观数据", detail={"data_source": _df_source(margin_macro)})
 
     short_col = _resolve_col(
         margin_macro, "short_balance", "融券余额", "short_balance_total"
     )
     if short_col is None:
-        return neutral_signal(key, label, "无融券余额字段")
+        return neutral_signal(key, label, "无融券余额字段", detail={"data_source": _df_source(margin_macro)})
 
     date_col = _resolve_col(margin_macro, "date", "日期")
     if date_col is not None:
@@ -318,16 +335,17 @@ def detect_short_trend(
         grouped = bal
 
     if len(grouped) < change_days + 1:
-        return neutral_signal(key, label, f"数据不足（需≥{change_days + 1}日，当前{len(grouped)}日）")
+        return neutral_signal(key, label, f"数据不足（需≥{change_days + 1}日，当前{len(grouped)}日）", detail={"data_source": _df_source(margin_macro)})
 
     current = grouped.iloc[-1]
     prev = grouped.iloc[-(change_days + 1)]
     if prev == 0:
-        return neutral_signal(key, label, "前期融券余额为零")
+        return neutral_signal(key, label, "前期融券余额为零", detail={"data_source": _df_source(margin_macro)})
 
     change_rate = (current - prev) / prev * 100
 
     detail = {
+        "data_source": _df_source(margin_macro),
         "current_short_balance_亿": round(float(current) / 1e8, 2),
         "prev_short_balance_亿": round(float(prev) / 1e8, 2) if prev else 0,
         "change_days": change_days,
@@ -390,7 +408,7 @@ def detect_margin_heavy_stocks(
     top_n = config.get("margin", {}).get("top_n_margin_stocks", 20)
 
     if margin_detail.empty:
-        return neutral_signal(key, label, "无融资明细数据")
+        return neutral_signal(key, label, "无融资明细数据", detail={"data_source": _df_source(margin_detail)})
 
     bal_col = _resolve_col(
         margin_detail, "margin_balance", "融资余额"
@@ -400,7 +418,7 @@ def detect_margin_heavy_stocks(
     )
 
     if bal_col is None and buy_col is None:
-        return neutral_signal(key, label, "无融资余额/买入额字段")
+        return neutral_signal(key, label, "无融资余额/买入额字段", detail={"data_source": _df_source(margin_detail)})
 
     # Get symbol column
     sym_col = _resolve_col(margin_detail, "symbol", "股票代码")
@@ -411,17 +429,23 @@ def detect_margin_heavy_stocks(
     direction = "neutral"
     strength = 0.0
 
-    detail: dict = {"top_n": top_n}
+    detail: dict = {"data_source": _df_source(margin_detail), "top_n": top_n}
+
+    # Filter to latest date per symbol to avoid multi-day inflation
+    margin_latest = margin_detail.copy()
+    if "date" in margin_latest.columns:
+        margin_latest = margin_latest.sort_values("date")
+        margin_latest = margin_latest.groupby(sym_col if sym_col else margin_latest.index).last().reset_index()
 
     if bal_col is not None:
-        top_bal = margin_detail.nlargest(top_n, bal_col)
+        top_bal = margin_latest.nlargest(top_n, bal_col)
         if sym_col is not None:
             top_symbols_bal = top_bal[sym_col].tolist()
         else:
             top_symbols_bal = top_bal.index.tolist()[:top_n]
         detail["top_by_balance"] = top_symbols_bal[:10]
 
-        total_bal = pd.to_numeric(margin_detail[bal_col], errors="coerce").sum()
+        total_bal = pd.to_numeric(margin_latest[bal_col], errors="coerce").sum()
         top_bal_sum = pd.to_numeric(top_bal[bal_col], errors="coerce").sum()
         concentration = top_bal_sum / total_bal * 100 if total_bal > 0 else 0
         detail["balance_concentration_pct"] = round(float(concentration), 1)
@@ -438,7 +462,7 @@ def detect_margin_heavy_stocks(
         summary = "融资重仓股数据基于买入额排名"
 
     if buy_col is not None:
-        top_buy = margin_detail.nlargest(top_n, buy_col)
+        top_buy = margin_latest.nlargest(top_n, buy_col)
         if sym_col is not None:
             top_symbols_buy = top_buy[sym_col].tolist()
         else:
@@ -470,13 +494,13 @@ def detect_margin_short_ratio(
     label = "融资融券比"
 
     if margin_macro.empty:
-        return neutral_signal(key, label, "无融资融券宏观数据")
+        return neutral_signal(key, label, "无融资融券宏观数据", detail={"data_source": _df_source(margin_macro)})
 
     bal_col = _resolve_col(margin_macro, "margin_balance", "融资余额")
     short_col = _resolve_col(margin_macro, "short_balance", "融券余额")
 
     if bal_col is None or short_col is None:
-        return neutral_signal(key, label, "缺少融资余额或融券余额字段")
+        return neutral_signal(key, label, "缺少融资余额或融券余额字段", detail={"data_source": _df_source(margin_macro)})
 
     date_col = _resolve_col(margin_macro, "date", "日期")
     if date_col is not None:
@@ -487,12 +511,12 @@ def detect_margin_short_ratio(
         grouped_short = pd.to_numeric(margin_macro[short_col], errors="coerce")
 
     if grouped_short.empty or (grouped_short == 0).any():
-        return neutral_signal(key, label, "融券余额为零，无法计算比率")
+        return neutral_signal(key, label, "融券余额为零，无法计算比率", detail={"data_source": _df_source(margin_macro)})
 
     ratio = grouped_bal / grouped_short
 
     if len(ratio) < 6:
-        return neutral_signal(key, label, f"数据不足（仅{len(ratio)}日）")
+        return neutral_signal(key, label, f"数据不足（仅{len(ratio)}日）", detail={"data_source": _df_source(margin_macro)})
 
     current = ratio.iloc[-1]
     prev_5d = ratio.iloc[-6] if len(ratio) >= 6 else ratio.iloc[0]
@@ -502,6 +526,7 @@ def detect_margin_short_ratio(
     change_20d = (current - prev_20d) / prev_20d * 100 if prev_20d != 0 else 0
 
     detail = {
+        "data_source": _df_source(margin_macro),
         "current_ratio": round(float(current), 2),
         "change_5d_pct": round(float(change_5d), 2),
         "change_20d_pct": round(float(change_20d), 2),
@@ -559,43 +584,220 @@ def detect_margin_type_distribution(
     label = "融资类型分布"
 
     if margin_detail.empty:
-        return neutral_signal(key, label, "无融资明细数据")
+        return neutral_signal(key, label, "无融资明细数据", detail={"data_source": _df_source(margin_detail)})
 
     type_col = _resolve_col(margin_detail, "margin_type", "融资类型")
     if type_col is None:
-        return neutral_signal(key, label, "无融资类型字段")
+        return neutral_signal(key, label, "无融资类型字段", detail={"data_source": _df_source(margin_detail)})
 
     type_counts = margin_detail[type_col].value_counts()
     total = len(margin_detail)
 
-    detail = {"total_stocks": total}
+    detail = {"data_source": _df_source(margin_detail), "total_stocks": total}
     for t, count in type_counts.items():
         detail[f"type_{t}_count"] = count
         detail[f"type_{t}_pct"] = round(count / total * 100, 1)
 
     # Check if there's meaningful distribution
     if len(type_counts) <= 1:
-        return neutral_signal(key, label, f"融资类型单一（{type_counts.index[0] if len(type_counts) > 0 else '未知'}）")
+        return neutral_signal(key, label, f"融资类型单一（{type_counts.index[0] if len(type_counts) > 0 else '未知'}）", detail={"data_source": _df_source(margin_detail)})
 
     triggered = True
     # If stock-collateral type is dominant, flag as slightly bearish
     dominant_type = type_counts.index[0]
     dominant_pct = type_counts.iloc[0] / total * 100
 
+    # Map type values to Chinese with risk interpretation
+    _type_labels = {
+        "cash": "现金担保融资",
+        "stock": "股票担保融资",
+        "现金": "现金担保融资",
+        "股票": "股票担保融资",
+        "融资融券": "两融综合",
+    }
+    _type_risk = {
+        "cash": "质押稳定，风险可控",
+        "stock": "受股价波动影响，需关注质押物贬值风险",
+        "现金": "质押稳定，风险可控",
+        "股票": "受股价波动影响，需关注质押物贬值风险",
+    }
+
     if dominant_pct > 80:
         direction = "neutral"
         strength = -0.1
-        summary = f"融资类型以'{dominant_type}'为主（{dominant_pct:.0f}%），高度集中"
+        dom_label = _type_labels.get(str(dominant_type), str(dominant_type))
+        dom_risk = _type_risk.get(str(dominant_type), "")
+        summary = f"融资类型以{dom_label}为主（{dominant_pct:.0f}%），高度集中" + (f"——{dom_risk}" if dom_risk else "")
     else:
         direction = "neutral"
         strength = 0.0
-        summary = f"融资类型分布：{'、'.join(f'{t}({c/total*100:.0f}%)' for t, c in type_counts.head(3).items())}"
+        parts = []
+        for t, c in type_counts.head(3).items():
+            label = _type_labels.get(str(t), str(t))
+            risk = _type_risk.get(str(t), "")
+            parts.append(f"{label}({c/total*100:.0f}%)——{risk}" if risk else f"{label}({c/total*100:.0f}%)")
+        summary = f"融资类型分布：{'；'.join(parts)}。结构均衡，融资类型分布健康。"
 
     return SignalResult(
         key=key, label=label, triggered=triggered,
         strength=round(strength, 4), direction=direction,
         summary=summary, detail=detail,
     )
+
+
+# ------------------------------------------------------------------
+# Detector 7: Extreme Regime (极端杠杆区间)
+# ------------------------------------------------------------------
+
+def detect_margin_extreme_regime(
+    margin_macro: pd.DataFrame,
+    config: dict,
+) -> SignalResult:
+    """Detect extreme margin balance regimes via historical percentile analysis.
+
+    Uses rolling percentile of margin balance to detect:
+      - > P95 + high buy ratio → "杠杆极端过热" (strong bearish, -0.9)
+      - > P95, buy ratio normal → "杠杆高位运行" (moderate bearish, -0.5)
+      - < P5 → "杠杆极端冰点" (bullish, +0.6)
+      - Normal range → not triggered
+
+    Args:
+        margin_macro: Aggregate SH+SZ margin history with margin_balance column.
+        config: Full runtime config dict.
+
+    Returns:
+        SignalResult with key="margin_extreme_regime".
+    """
+    key = "margin_extreme_regime"
+    label = "杠杆极端区间"
+    cfg = config.get("margin", {})
+    extreme_pct = cfg.get("extreme_percentile", 95)
+    ice_pct = cfg.get("ice_point_percentile", 5)
+    min_history = cfg.get("extreme_regime_min_history", 60)
+
+    if margin_macro.empty:
+        return neutral_signal(key, label, "无融资宏观数据", detail={"data_source": _df_source(margin_macro)})
+
+    bal_col = _resolve_col(
+        margin_macro, "margin_balance", "融资余额", "margin_balance_total"
+    )
+    if bal_col is None:
+        return neutral_signal(key, label, "无融资余额字段", detail={"data_source": _df_source(margin_macro)})
+
+    date_col = _resolve_col(margin_macro, "date", "日期")
+    if date_col is not None:
+        grouped = margin_macro.groupby(date_col)[bal_col].sum().sort_index()
+    else:
+        grouped = pd.to_numeric(margin_macro[bal_col], errors="coerce").dropna()
+
+    if len(grouped) < min_history:
+        return neutral_signal(
+            key, label,
+            f"历史数据不足（需≥{min_history}日，当前{len(grouped)}日）",
+            detail={"data_source": _df_source(margin_macro)},
+        )
+
+    current = grouped.iloc[-1]
+    hist = grouped.iloc[:-1]  # exclude current day for percentile calc
+    p95 = float(np.percentile(hist, extreme_pct))
+    p5 = float(np.percentile(hist, ice_pct))
+
+    detail = {
+        "data_source": _df_source(margin_macro),
+        "current_balance_亿": round(float(current) / 1e8, 2),
+        "p95_亿": round(p95 / 1e8, 2),
+        "p5_亿": round(p5 / 1e8, 2),
+        "percentile_rank": round(float((hist < current).mean()) * 100, 1),
+        "min_history": min_history,
+    }
+
+    if current > p95:
+        # Try to extract buy ratio for combined signal
+        buy_ratio = _extract_margin_buy_ratio(margin_macro, config)
+        danger_threshold = cfg.get("buy_ratio_dangerous", 0.15)
+
+        if buy_ratio is not None and buy_ratio >= danger_threshold:
+            triggered = True
+            direction = "bearish"
+            strength = -0.9
+            summary = (
+                f"融资余额{current / 1e8:.0f}亿超过P{extreme_pct}（{p95 / 1e8:.0f}亿），"
+                f"买入比{buy_ratio:.0%}（≥{danger_threshold:.0%}），"
+                f"杠杆极端过热，系统性风险极高"
+            )
+        else:
+            triggered = True
+            direction = "bearish"
+            strength = -0.5
+            summary = (
+                f"融资余额{current / 1e8:.0f}亿超过P{extreme_pct}（{p95 / 1e8:.0f}亿），"
+                f"杠杆高位运行，回调风险上升"
+            )
+        detail["buy_ratio"] = round(buy_ratio, 4) if buy_ratio is not None else None
+    elif current < p5:
+        triggered = True
+        direction = "bullish"
+        strength = 0.6
+        summary = (
+            f"融资余额{current / 1e8:.0f}亿低于P{ice_pct}（{p5 / 1e8:.0f}亿），"
+            f"杠杆极端冰点，市场情绪见底信号"
+        )
+    else:
+        triggered = False
+        direction = "neutral"
+        strength = 0.0
+        pct_rank = round(float((hist < current).mean()) * 100, 1)
+        summary = (
+            f"融资余额{current / 1e8:.0f}亿处于P{pct_rank}分位，杠杆水平正常"
+        )
+
+    return SignalResult(
+        key=key, label=label, triggered=triggered,
+        strength=round(strength, 4), direction=direction,
+        summary=summary, detail=detail,
+    )
+
+
+def _extract_margin_buy_ratio(
+    margin_macro: pd.DataFrame,
+    config: dict,
+) -> Optional[float]:
+    """Extract current margin buy ratio from macro data.
+
+    Tries actual buy/turnover ratio first, then falls back to
+    the heuristic estimate used by ``detect_margin_buy_ratio``.
+
+    Returns:
+        Buy ratio as float (0.0–1.0), or None if data unavailable.
+    """
+    buy_col = _resolve_col(margin_macro, "buy_on_margin_value", "融资买入额", "margin_buy")
+    if buy_col is None:
+        return None
+
+    date_col = _resolve_col(margin_macro, "date", "日期")
+    if date_col is not None:
+        latest = margin_macro[date_col].max()
+        latest_macro = margin_macro[margin_macro[date_col] == latest]
+    else:
+        latest_macro = margin_macro
+
+    total_buy = pd.to_numeric(latest_macro[buy_col], errors="coerce").sum()
+
+    turnover_col = _resolve_col(margin_macro, "total_turnover", "总成交额", "market_turnover")
+    if turnover_col is not None:
+        total_turnover = pd.to_numeric(latest_macro[turnover_col], errors="coerce").sum()
+        if total_turnover > 0:
+            return float(total_buy) / float(total_turnover)
+
+    # Estimate from buy amount heuristic
+    buy_amount_亿 = float(total_buy) / 1e8
+    buckets = config.get("margin", {}).get("buy_ratio_estimate_buckets", [
+        [1500, 0.18], [1000, 0.12], [500, 0.08], [200, 0.05],
+    ])
+    for threshold_亿, ratio in buckets:
+        if buy_amount_亿 > threshold_亿:
+            return ratio
+    return 0.02
 
 
 # ------------------------------------------------------------------
@@ -645,6 +847,13 @@ MARGIN_REGISTRY = {
         "description": "现金vs股票融资占比分析",
         "half_life_days": 20,
     },
+    "margin_extreme_regime": {
+        "func": detect_margin_extreme_regime,
+        "weight": 3,
+        "label": "杠杆极端区间",
+        "description": "历史分位数检测：>P95过热 / <P5冰点",
+        "half_life_days": 30,
+    },
 }
 
 
@@ -688,7 +897,7 @@ def run_all_detectors(
             results.append(result)
         except Exception:
             logger.exception("Margin detector %s failed", key)
-            results.append(neutral_signal(key, entry["label"], "检测器异常"))
+            results.append(neutral_signal(key, entry["label"], "检测器异常", detail={"data_source": "unknown"}))
     return results
 
 

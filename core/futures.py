@@ -93,7 +93,7 @@ def detect_futures_basis(
     label = "期货基差"
 
     if futures_data.empty:
-        return neutral_signal(key, label, "无股指期货数据")
+        return neutral_signal(key, label, "无股指期货数据", detail={"data_source": "akshare_sina"})
 
     # Need date, close, spot_close columns
     date_col = _resolve_col(futures_data, "date", "日期")
@@ -102,7 +102,7 @@ def detect_futures_basis(
     idx_col = _resolve_col(futures_data, "index_name", "指数名称", "contract", "合约")
 
     if close_col is None or spot_col is None:
-        return neutral_signal(key, label, "期货数据缺少价格字段")
+        return neutral_signal(key, label, "期货数据缺少价格字段", detail={"data_source": "akshare_sina"})
 
     df = futures_data.copy()
     df[close_col] = _safe_float(df[close_col])
@@ -116,7 +116,7 @@ def detect_futures_basis(
         latest = df.tail(3)
 
     if latest.empty or latest[close_col].isna().all():
-        return neutral_signal(key, label, "期货价格数据为空")
+        return neutral_signal(key, label, "期货价格数据为空", detail={"data_source": "akshare_sina"})
 
     # Calculate basis for each index
     latest["basis_pct"] = (
@@ -125,7 +125,7 @@ def detect_futures_basis(
 
     basis_values = latest["basis_pct"].dropna()
     if len(basis_values) < 1:
-        return neutral_signal(key, label, "无法计算基差")
+        return neutral_signal(key, label, "无法计算基差", detail={"data_source": "akshare_sina"})
 
     avg_basis = float(basis_values.mean())
     n_positive = int((basis_values > 0).sum())
@@ -195,6 +195,7 @@ def detect_futures_basis(
         strength=round(strength, 4), direction=direction,
         summary=summary,
         detail={
+            "data_source": "akshare_sina",
             "avg_basis_pct": round(avg_basis, 4),
             "n_positive": n_positive,
             "n_total": n_total,
@@ -225,7 +226,7 @@ def detect_open_interest_trend(
     label = "持仓量趋势"
 
     if futures_data.empty:
-        return neutral_signal(key, label, "无股指期货数据")
+        return neutral_signal(key, label, "无股指期货数据", detail={"data_source": "akshare_sina"})
 
     oi_col = _resolve_col(
         futures_data, "open_interest", "持仓量", "oi", "open_interest_qty"
@@ -235,7 +236,7 @@ def detect_open_interest_trend(
     close_col = _resolve_col(futures_data, "close", "收盘价")
 
     if oi_col is None:
-        return neutral_signal(key, label, "期货数据缺少持仓量字段")
+        return neutral_signal(key, label, "期货数据缺少持仓量字段", detail={"data_source": "akshare_sina"})
 
     df = futures_data.copy()
     df[oi_col] = _safe_float(df[oi_col])
@@ -243,7 +244,7 @@ def detect_open_interest_trend(
         df[close_col] = _safe_float(df[close_col])
 
     if date_col is None:
-        return neutral_signal(key, label, "期货数据缺少日期字段")
+        return neutral_signal(key, label, "期货数据缺少日期字段", detail={"data_source": "akshare_sina"})
 
     df = df.sort_values(date_col)
 
@@ -270,7 +271,7 @@ def detect_open_interest_trend(
                     oi_changes.append(change_pct)
 
     if not oi_changes:
-        return neutral_signal(key, label, "持仓量数据不足（需至少5个交易日）")
+        return neutral_signal(key, label, "持仓量数据不足（需至少5个交易日）", detail={"data_source": "akshare_sina"})
 
     avg_oi_change = float(np.mean(oi_changes))
 
@@ -326,6 +327,7 @@ def detect_open_interest_trend(
         strength=round(strength, 4), direction=direction,
         summary=summary,
         detail={
+            "data_source": "akshare_sina",
             "avg_oi_change_pct": round(avg_oi_change, 4),
             "oi_changes": [round(c, 4) for c in oi_changes],
             "n_indices": n_idx,
@@ -357,7 +359,7 @@ def detect_basis_oi_convergence(
     label = "基差持仓共振"
 
     if futures_data.empty:
-        return neutral_signal(key, label, "无股指期货数据")
+        return neutral_signal(key, label, "无股指期货数据", detail={"data_source": "akshare_sina"})
 
     # Run individual detectors
     basis_result = detect_futures_basis(futures_data, config)
@@ -370,6 +372,7 @@ def detect_basis_oi_convergence(
             strength=0.0, direction="neutral",
             summary="基差与持仓未形成共振（单边信号不足）",
             detail={
+                "data_source": "akshare_sina",
                 "basis_triggered": basis_result.triggered,
                 "oi_triggered": oi_result.triggered,
                 "basis_direction": basis_result.direction,
@@ -413,6 +416,7 @@ def detect_basis_oi_convergence(
         strength=round(strength, 4), direction=direction,
         summary=summary,
         detail={
+            "data_source": "akshare_sina",
             "basis_triggered": basis_result.triggered,
             "oi_triggered": oi_result.triggered,
             "basis_direction": basis_result.direction,
@@ -466,7 +470,7 @@ def run_all_detectors(
             result = func(futures_data, config)
         except Exception:
             logger.debug("Futures detector '%s' failed", key, exc_info=True)
-            result = neutral_signal(key, entry["label"], f"{entry['label']}执行异常")
+            result = neutral_signal(key, entry["label"], f"{entry['label']}执行异常", detail={"data_source": "akshare_sina"})
 
         results.append(result)
 

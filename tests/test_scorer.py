@@ -8,9 +8,11 @@ from core.scorer import (
     _assign_grade,
     compute_capital_flow_score,
     compute_industry_neutral_ranking,
+    compute_risk_level,
     rank_stocks_by_margin_balance,
     rank_stocks_by_margin_buy,
     CompositeScore,
+    RiskLevel,
 )
 
 
@@ -64,6 +66,51 @@ class TestComputeCapitalFlowScore:
         # NB weighted more → positive bias
         assert result.northbound_score == 0.5
         assert result.margin_score == -0.5
+
+    def test_pv_composite_included_in_score(self, sample_config):
+        """PV composite should shift the base score when nonzero."""
+        result_no_pv = compute_capital_flow_score(
+            0.5, 0.5, 0.0, 2, 2, 0, sample_config,
+            pv_composite=0.0, pv_triggered_count=0,
+        )
+        result_with_pv = compute_capital_flow_score(
+            0.5, 0.5, 0.0, 2, 2, 0, sample_config,
+            pv_composite=0.8, pv_triggered_count=2,
+        )
+        assert result_with_pv.score >= result_no_pv.score
+
+    def test_pv_composite_negative_pulls_down(self, sample_config):
+        """Negative PV composite should reduce score."""
+        result_no_pv = compute_capital_flow_score(
+            0.5, 0.5, 0.0, 2, 2, 0, sample_config,
+            pv_composite=0.0, pv_triggered_count=0,
+        )
+        result_with_pv = compute_capital_flow_score(
+            0.5, 0.5, 0.0, 2, 2, 0, sample_config,
+            pv_composite=-0.8, pv_triggered_count=2,
+        )
+        assert result_with_pv.score <= result_no_pv.score
+
+    def test_pv_triggered_contributes_to_risk(self):
+        """PV triggered count should be included in total for risk penalty."""
+        config = {
+            "scoring": {
+                "northbound_weight": 0.35, "margin_weight": 0.35,
+                "futures_weight": 0.2, "price_volume_weight": 0.1,
+                "risk_penalty_high_triggered": 8,
+                "risk_penalty_high_amount": 0.2,
+                "risk_penalty_high_base_threshold": 0.6,
+                "risk_penalty_medium_triggered": 6,
+                "risk_penalty_medium_amount": 0.1,
+                "risk_penalty_medium_base_threshold": 0.5,
+            },
+        }
+        # 4 nb + 3 mg + 2 pv = 9 total (exceeds 8 high threshold)
+        result = compute_capital_flow_score(
+            0.8, 0.7, 0.0, 4, 3, 0, config,
+            pv_composite=0.5, pv_triggered_count=2,
+        )
+        assert result.risk_penalty > 0
 
 
 class TestRankStocksByMarginBalance:
@@ -329,6 +376,42 @@ class TestIndustryNeutralRanking:
         assert result["z_buy"].iloc[0] == 0.0
         assert result["composite_z"].iloc[0] == 0.0
 
+    def test_prefer_sw_industry_when_available(self):
+        """When sw_industry column exists, use it instead of industry."""
+        margin = pd.DataFrame({
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "date": ["20260630"] * 3,
+            "margin_balance": [10e8, 20e8, 30e8],
+            "buy_on_margin_value": [1e8, 2e8, 3e8],
+        })
+        info = pd.DataFrame({
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "name": ["A", "B", "C"],
+            "industry": ["银行", "电子", "电子"],          # Old classification
+            "sw_industry": ["半导体", "银行", "银行"],    # Shenwan classification
+        })
+        result = compute_industry_neutral_ranking(margin, info)
+        # Should use sw_industry → 2 industries: 半导体(1 stock), 银行(2 stocks)
+        assert "半导体" in result["industry"].values or "银行" in result["industry"].values
+        # Should NOT contain the old "电子" classification
+        assert "电子" not in result["industry"].values
+
+    def test_fallback_to_industry_when_no_sw(self):
+        """Without sw_industry column, should fall back to industry column."""
+        margin = pd.DataFrame({
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "date": ["20260630"] * 3,
+            "margin_balance": [10e8, 20e8, 30e8],
+            "buy_on_margin_value": [1e8, 2e8, 3e8],
+        })
+        info = pd.DataFrame({
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "name": ["A", "B", "C"],
+            "industry": ["银行", "电子", "电子"],
+        })
+        result = compute_industry_neutral_ranking(margin, info)
+        assert "电子" in result["industry"].values
+
 
 # ── _assign_grade direct tests ──
 
@@ -432,3 +515,101 @@ class TestAssignGrade:
     def test_boundary_just_below_15(self):
         grade, _ = _assign_grade(14.99)
         assert grade == "F-"
+
+
+# ── Risk level tests ──
+
+
+class TestComputeRiskLevel:
+    """Tests for compute_risk_level()."""
+
+    def _make_signal(self, key, label, triggered, direction, strength):
+        from core._types import SignalResult
+        return SignalResult(
+            key=key, label=label, triggered=triggered,
+            strength=strength, direction=direction, summary=f"{label} test",
+        )
+
+    def _make_resonance(self, pattern, label, triggered, direction, strength):
+        from core.resonance import ResonanceResult
+        return ResonanceResult(
+            pattern=pattern, label=label, triggered=triggered,
+            strength=strength, direction=direction,
+            summary=f"{label} test", description="",
+            nb_score=0.0, margin_score=0.0,
+        )
+
+    def test_all_neutral_zero_risk(self):
+        nb = [self._make_signal("a", "A", False, "neutral", 0.0)]
+        mg = [self._make_signal("b", "B", False, "neutral", 0.0)]
+        fut = [self._make_signal("c", "C", False, "neutral", 0.0)]
+        res = [self._make_resonance("r", "R", False, "neutral", 0.0)]
+        result = compute_risk_level(nb, mg, fut, res)
+        assert result.score == 0.0
+        assert result.stars == 0
+        assert result.level == "低风险"
+
+    def test_all_bearish_high_risk(self):
+        nb = [self._make_signal("a", "A", True, "bearish", -0.8)]
+        mg = [self._make_signal("b", "B", True, "bearish", -0.7)]
+        fut = [self._make_signal("c", "C", True, "bearish", -0.6)]
+        res = [self._make_resonance("r", "R", True, "bearish", -0.9)]
+        result = compute_risk_level(nb, mg, fut, res)
+        assert result.score > 50
+        assert result.stars >= 3
+        assert result.level in ("中风险", "高风险")
+
+    def test_mixed_signals_partial_risk(self):
+        nb = [
+            self._make_signal("a", "A", True, "bullish", 0.7),
+            self._make_signal("b", "B", True, "bearish", -0.5),
+        ]
+        mg = [self._make_signal("c", "C", False, "neutral", 0.0)]
+        fut = []
+        res = []
+        result = compute_risk_level(nb, mg, fut, res)
+        assert 0 <= result.stars <= 5
+        assert len(result.details) > 0
+
+    def test_factor_breakdown_keys(self):
+        nb = [self._make_signal("a", "A", True, "bearish", -0.6)]
+        mg = []
+        fut = []
+        res = []
+        result = compute_risk_level(nb, mg, fut, res)
+        assert isinstance(result.factor_bearish_ratio, float)
+        assert isinstance(result.factor_bearish_intensity, float)
+        assert isinstance(result.factor_resonance, float)
+        assert isinstance(result.factor_margin_danger, float)
+
+    def test_stars_range(self):
+        """Stars should always be in 0-5 range for any input."""
+        nb = [
+            self._make_signal(f"a{i}", f"A{i}", True, "bearish", -1.0)
+            for i in range(10)
+        ]
+        mg = []
+        fut = []
+        res = [
+            self._make_resonance(f"r{i}", f"R{i}", True, "bearish", -1.0)
+            for i in range(4)
+        ]
+        result = compute_risk_level(nb, mg, fut, res)
+        assert 0 <= result.stars <= 5
+
+    def test_risk_level_returns_dataclass(self):
+        result = compute_risk_level([], [], [], [])
+        assert isinstance(result, RiskLevel)
+
+    def test_margin_danger_factor(self, sample_margin_macro):
+        """High margin buy ratio should trigger margin_danger factor."""
+        import pandas as pd
+        df = sample_margin_macro.copy()
+        # Make buy_on_margin_value very high relative to margin_balance
+        if "buy_on_margin_value" in df.columns and "margin_balance" in df.columns:
+            df["buy_on_margin_value"] = df["margin_balance"] * 0.16  # 16% → dangerous
+            result = compute_risk_level(
+                [], [], [], [],
+                margin_macro=df, config={"margin": {"buy_ratio_dangerous": 0.15, "buy_ratio_hot": 0.10}},
+            )
+            assert result.factor_margin_danger == 1.0

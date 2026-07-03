@@ -27,6 +27,8 @@ class CompositeScore:
     resonance_score: float    # -1 to 1
     risk_penalty: float       # 0–1, higher = more risk
     summary: str
+    nb_data_quality: float = 1.0       # 0-1, quality of NB data
+    nb_quality_note: str = ""          # Explanation if quality degraded
 
 
 # ------------------------------------------------------------------
@@ -43,12 +45,19 @@ def compute_capital_flow_score(
     config: dict,
     futures_composite: float = 0.0,
     futures_triggered_count: int = 0,
+    pv_composite: float = 0.0,
+    pv_triggered_count: int = 0,
+    micro_composite: float = 0.0,
+    micro_triggered_count: int = 0,
+    max_possible: int = 21,
+    nb_data_quality: float = 1.0,
 ) -> CompositeScore:
     """Compute the 0–100 capital flow composite score.
 
     Formula:
         base = nb_weight * nb_composite + margin_weight * margin_composite
-               + futures_weight * futures_composite
+               + futures_weight * futures_composite + pv_weight * pv_composite
+               + micro_weight * micro_composite
         with_resonance = base * (1 + resonance_modifier)
         score_0_100 = (with_resonance + 1) * 50  (map -1..1 → 0..100)
         risk_penalty applied if triggered signals cross danger thresholds
@@ -63,21 +72,55 @@ def compute_capital_flow_score(
         config: Full runtime config dict.
         futures_composite: Futures composite score (-1 to 1). Default 0.0.
         futures_triggered_count: Number of triggered futures signals. Default 0.
+        pv_composite: Price-volume composite score (-1 to 1). Default 0.0.
+        pv_triggered_count: Number of triggered price-volume signals. Default 0.
+        micro_composite: Microstructure composite score (-1 to 1). Default 0.0.
+        micro_triggered_count: Number of triggered microstructure signals. Default 0.
+        max_possible: Total possible triggered signals across all dimensions.
+            Computed at call site from signal list lengths. Default 21
+            (6 nb + 6 margin + 3 futures + 2 pv + 4 micro).
+        nb_data_quality: Northbound data quality score 0.0-1.0 (1.0 = all real,
+            0.0 = all proxy). When < 0.5, NB weight is auto-reduced and
+            redistributed to other dimensions. Default 1.0.
 
     Returns:
         CompositeScore with 0–100 score and grade.
     """
     scoring_cfg = config.get("scoring", {})
-    nb_weight = scoring_cfg.get("northbound_weight", 0.4)
-    margin_weight = scoring_cfg.get("margin_weight", 0.4)
-    futures_weight = scoring_cfg.get("futures_weight", 0.2)
+    nb_weight = scoring_cfg.get("northbound_weight", 0.35)
+    margin_weight = scoring_cfg.get("margin_weight", 0.35)
+    futures_weight = scoring_cfg.get("futures_weight", 0.17)
+    pv_weight = scoring_cfg.get("price_volume_weight", 0.08)
+    micro_weight = scoring_cfg.get("microstructure_weight", 0.05)
     risk_threshold = scoring_cfg.get("risk_overheat_threshold", 0.7)
 
-    # Base weighted score (3 dimensions)
+    # ── Adaptive weighting: reduce NB weight when data quality is degraded ──
+    quality_threshold = scoring_cfg.get("nb_quality_threshold", 0.5)
+    quality_decay = scoring_cfg.get("nb_quality_decay", 0.6)
+    nb_quality_note = ""
+
+    if nb_data_quality < quality_threshold:
+        # NB data is mostly proxy — reduce its weight
+        decay_factor = 1.0 - quality_decay * (1.0 - nb_data_quality / quality_threshold)
+        decay_factor = max(0.2, decay_factor)  # Floor: NB weight won't drop below 20% of original
+        reduced_nb = nb_weight * (1.0 - decay_factor)
+        # Redistribute to other dimensions proportionally
+        other_total = margin_weight + futures_weight + pv_weight + micro_weight
+        if other_total > 0:
+            margin_weight += reduced_nb * (margin_weight / other_total)
+            futures_weight += reduced_nb * (futures_weight / other_total)
+            pv_weight += reduced_nb * (pv_weight / other_total)
+            micro_weight += reduced_nb * (micro_weight / other_total)
+        nb_weight *= decay_factor
+        nb_quality_note = f" (北向数据质量{nb_data_quality:.0%}，权重自动下调)"
+
+    # Base weighted score (5 dimensions)
     base = (
         nb_weight * nb_composite
         + margin_weight * margin_composite
         + futures_weight * futures_composite
+        + pv_weight * pv_composite
+        + micro_weight * micro_composite
     )
 
     # Resonance amplifier (configurable)
@@ -102,19 +145,25 @@ def compute_capital_flow_score(
     score_0_100 = round((with_resonance + 1.0) * 50.0, 1)
 
     # Risk penalty: if many triggered signals all pointing same way,
-    # it could indicate overheating or panic
+    # it could indicate overheating or panic.
+    # Uses ratio-based thresholds so penalty scales automatically with
+    # the number of detectors in the system.
     risk_penalty = 0.0
-    total_triggered = nb_triggered_count + margin_triggered_count + futures_triggered_count
-    high_trig = scoring_cfg.get("risk_penalty_high_triggered", 8)
+    total_triggered = (nb_triggered_count + margin_triggered_count
+                       + futures_triggered_count + pv_triggered_count
+                       + micro_triggered_count)
+    # max_possible is passed in from the call site (computed from signal list lengths)
+    triggered_ratio = total_triggered / max(1, max_possible)
+    high_trig_ratio = scoring_cfg.get("risk_penalty_high_triggered_ratio", 0.38)
     high_amount = scoring_cfg.get("risk_penalty_high_amount", 0.2)
     high_base = scoring_cfg.get("risk_penalty_high_base_threshold", 0.6)
-    med_trig = scoring_cfg.get("risk_penalty_medium_triggered", 6)
+    med_trig_ratio = scoring_cfg.get("risk_penalty_medium_triggered_ratio", 0.28)
     med_amount = scoring_cfg.get("risk_penalty_medium_amount", 0.1)
     med_base = scoring_cfg.get("risk_penalty_medium_base_threshold", 0.5)
 
-    if total_triggered >= high_trig and abs(base) > high_base:
+    if triggered_ratio >= high_trig_ratio and abs(base) > high_base:
         risk_penalty = high_amount
-    elif total_triggered >= med_trig and abs(base) > med_base:
+    elif triggered_ratio >= med_trig_ratio and abs(base) > med_base:
         risk_penalty = med_amount
 
     if risk_penalty > 0:
@@ -148,6 +197,8 @@ def compute_capital_flow_score(
         resonance_score=round(resonance_score, 4),
         risk_penalty=round(risk_penalty, 4),
         summary=summary,
+        nb_data_quality=round(nb_data_quality, 4),
+        nb_quality_note=nb_quality_note,
     )
 
 
@@ -171,6 +222,167 @@ def _assign_grade(score: float) -> tuple[str, str]:
         return "F", "悲观"
     else:
         return "F-", "极度悲观"
+
+
+# ------------------------------------------------------------------
+# Risk level assessment
+# ------------------------------------------------------------------
+
+
+@dataclass
+class RiskLevel:
+    """Comprehensive risk assessment (0-5 star scale)."""
+    score: float              # 0-100 risk score
+    stars: int                # 0-5 star rating (0=low risk, 5=high risk)
+    level: str                # Chinese label (低风险/中风险/高风险)
+    factor_bearish_ratio: float      # bearish signal ratio contribution
+    factor_bearish_intensity: float  # bearish intensity contribution
+    factor_resonance: float          # resonance risk contribution
+    factor_margin_danger: float      # margin buy danger contribution
+    details: list[str]        # specific risk signals found
+
+
+def compute_risk_level(
+    nb_signals: list,
+    margin_signals: list,
+    futures_signals: list,
+    resonance_results: list,
+    pv_signals: list | None = None,
+    micro_signals: list | None = None,
+    margin_macro: pd.DataFrame | None = None,
+    config: dict | None = None,
+) -> RiskLevel:
+    """Compute a 0-5 star comprehensive risk score from all signals.
+
+    Four factors weighted:
+      - bearish signal ratio:   35% — how many triggered signals are bearish
+      - bearish intensity:      25% — how strong are the bearish signals
+      - resonance risk:         20% — bearish resonance/divergence patterns
+      - margin buy danger:      20% — margin buy ratio overheating
+
+    Args:
+        nb_signals: Northbound signal results.
+        margin_signals: Margin signal results.
+        futures_signals: Futures signal results.
+        resonance_results: Resonance pattern results.
+        pv_signals: Price-volume signal results (optional).
+        micro_signals: Microstructure signal results (optional).
+        margin_macro: Aggregated margin macro data (optional).
+        config: Runtime config dict.
+
+    Returns:
+        RiskLevel with 0-100 score, 0-5 stars, label, and factor breakdown.
+    """
+    config = config or {}
+    margin_cfg = config.get("margin", {})
+    buy_ratio_dangerous = margin_cfg.get("buy_ratio_dangerous", 0.15)
+    buy_ratio_hot = margin_cfg.get("buy_ratio_hot", 0.10)
+
+    # Collect all signals
+    all_signals = list(nb_signals) + list(margin_signals) + list(futures_signals)
+    if pv_signals:
+        all_signals.extend(pv_signals)
+    if micro_signals:
+        all_signals.extend(micro_signals)
+
+    total_triggered = sum(1 for s in all_signals if getattr(s, "triggered", False))
+    bearish_triggered = sum(
+        1 for s in all_signals
+        if getattr(s, "triggered", False) and getattr(s, "direction", "") == "bearish"
+    )
+
+    # Factor 1: bearish signal ratio (0-1)
+    factor_ratio = bearish_triggered / max(1, total_triggered) if total_triggered > 0 else 0.0
+
+    # Factor 2: bearish intensity (0-1, average |strength| / 3.0, capped at 1.0)
+    bearish_strengths = [
+        abs(getattr(s, "strength", 0.0))
+        for s in all_signals
+        if getattr(s, "triggered", False) and getattr(s, "direction", "") == "bearish"
+    ]
+    factor_intensity = min(1.0, sum(bearish_strengths) / 3.0) if bearish_strengths else 0.0
+
+    # Factor 3: resonance risk (0-1)
+    total_resonance = len(resonance_results)
+    bearish_resonance = sum(
+        1 for r in resonance_results
+        if getattr(r, "triggered", False) and getattr(r, "direction", "") == "bearish"
+    )
+    factor_resonance = bearish_resonance / max(1, total_resonance) if total_resonance > 0 else 0.0
+
+    # Factor 4: margin buy danger (0-1)
+    # margin_macro has SH+SZ per date — group by date and sum to get national totals
+    factor_margin = 0.0
+    if margin_macro is not None and not margin_macro.empty:
+        buy_col = None
+        bal_col = None
+        for col in ["buy_on_margin_value", "融资买入额"]:
+            if col in margin_macro.columns:
+                buy_col = col
+                break
+        if "margin_balance" in margin_macro.columns:
+            bal_col = "margin_balance"
+        elif "融资余额" in margin_macro.columns:
+            bal_col = "融资余额"
+
+        if buy_col is not None and bal_col is not None:
+            df = margin_macro.copy()
+            df["_buy"] = pd.to_numeric(df[buy_col], errors="coerce")
+            df["_bal"] = pd.to_numeric(df[bal_col], errors="coerce")
+            if "date" in df.columns:
+                daily = df.groupby("date", as_index=False).agg(
+                    _buy_sum=("_buy", "sum"),
+                    _bal_sum=("_bal", "sum"),
+                )
+                if len(daily) > 0:
+                    buy_val = daily["_buy_sum"].iloc[-1]
+                    bal_val = daily["_bal_sum"].iloc[-1]
+                    buy_ratio = buy_val / max(1, bal_val) if bal_val > 0 else 0
+                    if buy_ratio >= buy_ratio_dangerous:
+                        factor_margin = 1.0
+                    elif buy_ratio >= buy_ratio_hot:
+                        factor_margin = 0.5
+
+    # Weighted score (0-100)
+    weights = {"ratio": 0.35, "intensity": 0.25, "resonance": 0.20, "margin": 0.20}
+    risk_score = round(
+        (weights["ratio"] * factor_ratio
+         + weights["intensity"] * factor_intensity
+         + weights["resonance"] * factor_resonance
+         + weights["margin"] * factor_margin) * 100.0,
+        1,
+    )
+
+    # Stars: 0-5
+    stars = round(risk_score / 20.0)
+    stars = max(0, min(5, stars))
+
+    if stars <= 1:
+        level = "低风险"
+    elif stars <= 3:
+        level = "中风险"
+    else:
+        level = "高风险"
+
+    # Collect specific risk signals for display
+    details: list[str] = []
+    for s in all_signals:
+        if getattr(s, "triggered", False) and getattr(s, "direction", "") == "bearish":
+            label = getattr(s, "label", "")
+            summary = getattr(s, "summary", "")
+            if label and summary:
+                details.append(f"[{label}] {summary}")
+
+    return RiskLevel(
+        score=risk_score,
+        stars=stars,
+        level=level,
+        factor_bearish_ratio=round(factor_ratio, 4),
+        factor_bearish_intensity=round(factor_intensity, 4),
+        factor_resonance=round(factor_resonance, 4),
+        factor_margin_danger=round(factor_margin, 4),
+        details=details,
+    )
 
 
 # ------------------------------------------------------------------
@@ -244,12 +456,16 @@ def rank_stocks_by_margin_balance(
     else:
         result["name"] = ""
 
-    # Add industry if available
-    if not stock_info.empty and "industry" in stock_info.columns:
-        ind_col = "symbol" if "symbol" in stock_info.columns else "股票代码"
-        if ind_col in stock_info.columns:
-            ind_map = stock_info.set_index(ind_col)["industry"].to_dict()
-            result["industry"] = result[sym_col].map(ind_map).fillna("")
+    # Add industry if available (prefer Shenwan)
+    if not stock_info.empty:
+        ind_col_name = "sw_industry" if "sw_industry" in stock_info.columns else "industry"
+        if ind_col_name in stock_info.columns:
+            ind_col = "symbol" if "symbol" in stock_info.columns else "股票代码"
+            if ind_col in stock_info.columns:
+                ind_map = stock_info.set_index(ind_col)[ind_col_name].to_dict()
+                result["industry"] = result[sym_col].map(ind_map).fillna("")
+            else:
+                result["industry"] = ""
         else:
             result["industry"] = ""
     else:
@@ -315,8 +531,9 @@ def rank_stocks_by_margin_buy(
             result["name"] = result[sym_col].map(name_map).fillna("")
         else:
             result["name"] = ""
-        if "industry" in stock_info.columns:
-            ind_map = stock_info.set_index(info_sym)["industry"].to_dict() if info_sym in stock_info.columns else {}
+        if "industry" in stock_info.columns or "sw_industry" in stock_info.columns:
+            ind_col_name = "sw_industry" if "sw_industry" in stock_info.columns else "industry"
+            ind_map = stock_info.set_index(info_sym)[ind_col_name].to_dict() if info_sym in stock_info.columns else {}
             result["industry"] = result[sym_col].map(ind_map).fillna("")
         else:
             result["industry"] = ""
@@ -386,11 +603,21 @@ def compute_industry_neutral_ranking(
         df = df.sort_values("date")
         df = df.groupby(sym_col).last().reset_index()
 
-    # Merge with industry info
-    info_cols = [sym_col, "industry"] if "industry" in stock_info.columns else [sym_col]
+    # Merge with industry info — prefer Shenwan classification when available
+    industry_col_name = "industry"
+    if "sw_industry" in stock_info.columns:
+        industry_col_name = "sw_industry"
+        logger.info("Using Shenwan industry classification for neutral ranking")
+
+    info_cols = [sym_col, industry_col_name]
+    # Ensure both columns exist
+    info_cols = [c for c in info_cols if c in stock_info.columns]
+    if len(info_cols) < 2:
+        return pd.DataFrame()
+
     info_key = "symbol" if "symbol" in stock_info.columns else sym_col
     df = df.merge(
-        stock_info[info_cols].rename(columns={info_key: sym_col}),
+        stock_info[info_cols].rename(columns={info_key: sym_col, industry_col_name: "industry"}),
         on=sym_col, how="left",
     )
     if "industry" not in df.columns:

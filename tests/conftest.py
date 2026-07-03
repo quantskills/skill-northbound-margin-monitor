@@ -190,6 +190,67 @@ def sample_futures_data_bearish() -> pd.DataFrame:
     return df
 
 
+# ── Flow history fixtures ──
+
+@pytest.fixture
+def sample_nb_flow_history() -> pd.DataFrame:
+    """Mock accumulated flow direction history (10 trading days)."""
+    dates = ["20260615", "20260616", "20260617", "20260618", "20260619",
+             "20260622", "20260623", "20260624", "20260625", "20260626"]
+    return pd.DataFrame({
+        "date": dates,
+        "direction_sum": [1, 2, 1, 1, -1, 2, 1, 2, 1, 2],
+        "direction_days": [1, 2, 1, 1, 0.5, 2, 1, 2, 1, 2],
+        "adv_sum": [1800, 2000, 1700, 1600, 800, 2100, 1900, 2200, 2000, 2100],
+        "dec_sum": [500, 400, 600, 700, 1500, 400, 500, 300, 400, 300],
+        "flat_sum": [100, 80, 90, 70, 120, 80, 100, 60, 80, 70],
+        "index_chg_avg": [0.3, 0.5, 0.1, -0.1, -0.4, 0.8, 0.4, 0.6, 0.3, 0.7],
+    })
+
+
+@pytest.fixture
+def sample_nb_flow_history_bearish() -> pd.DataFrame:
+    """Mock flow history with persistent bearish direction (last 5 days outflow)."""
+    dates = ["20260615", "20260616", "20260617", "20260618", "20260619",
+             "20260622", "20260623", "20260624", "20260625", "20260626"]
+    return pd.DataFrame({
+        "date": dates,
+        "direction_sum": [1, 0, -1, -1, -2, -1, -2, -1, -2, -2],
+        "direction_days": [1, 0, 1, 1, 2, 1, 2, 1, 2, 2],
+        "adv_sum": [1500, 1000, 500, 400, 300, 600, 400, 500, 300, 400],
+        "dec_sum": [800, 1300, 1800, 1900, 2000, 1700, 1900, 1800, 2000, 1900],
+        "flat_sum": [100, 100, 90, 80, 70, 80, 90, 60, 70, 80],
+        "index_chg_avg": [0.1, -0.2, -0.5, -0.4, -0.8, -0.3, -0.6, -0.4, -0.7, -0.9],
+    })
+
+
+@pytest.fixture
+def sample_nb_flow_history_short() -> pd.DataFrame:
+    """Mock flow history with only 2 days (insufficient for trend)."""
+    return pd.DataFrame({
+        "date": ["20260625", "20260626"],
+        "direction_sum": [1, 2],
+        "direction_days": [1, 2],
+        "adv_sum": [2000, 2100],
+        "dec_sum": [400, 300],
+        "flat_sum": [80, 70],
+        "index_chg_avg": [0.3, 0.7],
+    })
+
+
+@pytest.fixture
+def sample_hkex_data() -> pd.DataFrame:
+    """Mock HKEX northbound turnover data."""
+    np.random.seed(99)
+    dates = ["20260615", "20260616", "20260617", "20260618", "20260619"]
+    return pd.DataFrame({
+        "date": dates,
+        "nb_buy_rmb": np.random.uniform(50, 100, 5) * 1e8,
+        "nb_sell_rmb": np.random.uniform(40, 90, 5) * 1e8,
+        "nb_net_rmb": np.random.uniform(-20, 30, 5) * 1e8,
+    })
+
+
 # ── Config fixture ──
 
 @pytest.fixture

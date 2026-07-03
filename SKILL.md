@@ -1,28 +1,33 @@
 ---
 name: skill-northbound-margin-monitor
-description: A-share 北向资金+融资融券全景监控，每日生成多信号分析日报
-version: 1.0.0
+description: A-share 北向资金+融资融券+股指期货全景监控，25信号检测器+4共振模式+LLM宏观研判+主力资金+龙虎榜+新高新低，每日多维度分析日报
+version: 2.2.0
 category: quant-skills
 triggers:
   - 北向资金
   - 融资融券
   - 全景监控
   - 资金流向
+  - 股指期货
   - margin monitor
 data_sources:
   - pandadata (融资融券个股 + 股票信息)
-  - eastmoney via akshare (北向资金汇总 + 市场流向)
+  - eastmoney via akshare (北向资金汇总 + 市场流向 + 融资宏观 + 涨跌停 + 主力资金)
+  - sina via akshare (股指期货数据)
+  - hkex (港交所北向补充数据, best-effort)
+  - deepseek/claude (LLM宏观研判)
 output_formats:
-  - markdown日报
+  - markdown日报 (12节)
   - json结构化数据
+  - streamlit仪表盘
 schedule: 每日收盘后
 ---
 
-# 北向资金 + 融资融券全景监控
+# 北向资金 + 融资融券 + 股指期货全景监控
 
 ## 概述
 
-每日监控 A 股北向资金（沪深港通）和融资融券全景数据，通过 **12 个信号检测器 + 4 个共振/背离模式** 生成综合情绪评分（0-100）和 Markdown/JSON 双格式日报。
+每日监控 A 股资金面全景数据，通过 **25 个信号检测器**（北向7 + 融资7 + 期货3 + 量价2 + 微观结构7）和 **4 个共振/背离模式**，配合 **LLM 宏观研判**（DeepSeek/Claude），生成跨资产综合情绪评分（0-100）、风险评级（★1-5）和 Markdown/JSON 双格式日报。
 
 ## 快速开始
 
@@ -34,14 +39,27 @@ pip install -r requirements.txt
 cp .env.example .env
 # 编辑 .env 填入 DEFAULT_USERNAME 和 DEFAULT_PASSWORD
 
+# 配置 LLM API Key（可选，无 Key 时使用规则引擎备选）
+# ANTHROPIC_API_KEY=sk-xxx
+# ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic  (DeepSeek 用户)
+
 # 运行（最新交易日）
 python run.py
 
-# 指定日期 + 强制刷新
+# 指定日期
+python run.py --date 20260630
+
+# 强制刷新（跳过缓存）
 python run.py --date 20260630 --no-cache
+
+# 精简模式（LLM 输出 150-200 字）
+python run.py --summary
 
 # 调整 TOP-N 数量 + 详细日志
 python run.py --top-n 30 --verbose
+
+# 清理旧缓存
+python run.py --cleanup-cache 30
 ```
 
 ## 核心架构
@@ -49,65 +67,188 @@ python run.py --top-n 30 --verbose
 ```
 run.py (CLI)
   └─ PanoramaPipeline.run()
-       ├─ DataFetcher: Pandadata(融资+股票) + AKShare(北向)
-       ├─ Northbound: 6 信号检测器 (registry pattern)
-       ├─ Margin:     6 信号检测器 (registry pattern)
-       ├─ Resonance:  4 共振/背离模式
-       ├─ Scorer:     综合评分 0-100
-       └─ Reporter:   Markdown + JSON 双输出
+       ├─ CacheManager: 日期分区 Parquet 缓存 + 离线备份
+       ├─ DataFetcher:   双源数据获取（Pandadata + AKShare + HKEX）
+       │    ├─ 融资明细: Pandadata → AKShare East Money (fallback)
+       │    ├─ 北向汇总: AKShare East Money stock_hsgt_hist_em
+       │    ├─ 北向流向: AKShare East Money stock_hsgt_fund_flow_summary_em
+       │    ├─ 融资宏观: AKShare East Money macro_china_market_margin_sh/sz
+       │    ├─ 股指期货: AKShare Sina futures_main_sina + stock_zh_index_daily
+       │    ├─ 申万行业: AKShare (30天缓存 + 离线备份)
+       │    ├─ HKEX补充: 港交所北向成交额 CSV (best-effort)
+       │    └─ 股票信息: Pandadata get_trade_list + get_stock_detail
+       ├─ FlowAccumulator: 北向流向日度历史累积
+       ├─ Northbound:   7 信号检测器 (registry pattern)
+       ├─ Margin:        7 信号检测器 (registry pattern)
+       ├─ Futures:       3 信号检测器 (registry pattern)
+       ├─ PriceVolume:   2 确认信号 (registry pattern)
+       ├─ Microstructure:7 广度/流动性/主力资金/龙虎榜/新高新低信号 (registry pattern)
+       ├─ Resonance:     4 跨资产共振/背离模式
+       ├─ Scorer:        5维加权综合评分 0-100 + 风险评级 + 行业中性排名
+       ├─ LLMAnalyst:    DeepSeek/Claude API (含重试+超时) + 规则引擎备选
+       └─ Reporter:      Markdown (12节) + JSON 双输出 + 历史对比
 ```
 
-## 信号检测器
+## 信号检测器 (25个)
 
-### 北向资金 (6 signals)
-| 检测器 | 权重 | 说明 |
-|--------|------|------|
-| 净流向趋势 | 3 | 连续N日净流入/流出 |
-| 累计趋势 | 3 | 累计净买入 MA20 vs MA60 |
-| 单日异常 | 2 | 当日 Z-score vs 60天分布 |
-| 板块偏好 | 2 | 行业持仓市值变化 |
-| 市场流向 | 2 | 沪股通/深股通方向一致性 |
-| 重仓股变动 | 1 | 持仓市值 5/20 日变动 |
+### 北向资金 (7 signals)
 
-### 融资融券 (6 signals)
-| 检测器 | 权重 | 说明 |
-|--------|------|------|
-| 融资余额趋势 | 3 | 当前 vs MA5/MA20，热度评级 |
-| 融资买入比 | 3 | 融资买入/总成交，>10%热 >15%危险 |
-| 融券趋势 | 2 | 5日融券余额变化率 |
-| 融资融券比 | 2 | 融资/融券比率趋势 |
-| 融资重仓股 | 1 | TOP20 集中度分析 |
-| 融资类型分布 | 1 | 现金/股票担保品分布 |
+| 检测器 | 权重 | 数据源 | 说明 |
+|--------|:----:|--------|------|
+| 净流向趋势 | 3 | 流向累积 > 净买入 > 市值差 > CSI300代理 | 连续N日净流入/流出方向检测，智能优先级降级 |
+| 流向趋势 | 3 | 流向累积（FlowAccumulator direction_sum） | 与flow_trend合并，优先使用北向方向累积数据 |
+| 单日异常 | 2 | 同净流向趋势降级链 | 当日净买入 Z-score vs 60天分布 |
+| 板块偏好 | 2 | CSI300代理（原市值/净买入不可用） | 行业持仓变动聚合分析 |
+| 市场流向 | 2 | 东方财富 stock_hsgt_fund_flow_summary_em | 沪股通+深股通方向一致/分歧检测，基于涨跌家数 |
+| 累计趋势 | 3 | CSI300代理（原累计净买入不可用） | 累计净买入 MA20 vs MA60，加速/减速检测 |
+| 重仓股变动 | 1 | 持股市值差分 | 持仓市值 5/20 日变动趋势 |
 
-### 共振/背离 (4 patterns)
-| 模式 | 条件 | 信号 |
+> **已知限制**：`net_buy_amount` 自2024年8月监管新规后为 NaN，`market_value` 近3月为 0。系统自动降级使用 CSI300 指数变动 + FlowAccumulator 方向数据作为替代。详见报告"数据溯源"节。
+
+### 融资融券 (7 signals)
+
+| 检测器 | 权重 | 数据源 | 说明 |
+|--------|:----:|--------|------|
+| 融资余额趋势 | 3 | East Money / Pandadata | 当前融资余额 vs MA5/MA20，热度评级（温和上升→过热→去杠杆） |
+| 融资买入比 | 3 | East Money / Pandadata | 融资买入/总成交，>10%热 >15%危险 |
+| 杠杆极端区间 | 3 | East Money / Pandadata | 历史分位数检测：>P95过热 / <P5冰点，结合买入比做二级判定 |
+| 融券趋势 | 2 | East Money / Pandadata | 5日融券余额变化率，看空情绪 |
+| 融资融券比 | 2 | East Money / Pandadata | 融资/融券总余额比率及5/20日趋势 |
+| 融资重仓股 | 1 | Pandadata | TOP20 融资余额/买入额排名 + 集中度分析 |
+| 融资类型分布 | 1 | Pandadata | 现金担保 vs 股票担保融资占比分析 |
+
+### 股指期货 (3 signals)
+
+| 检测器 | 权重 | 数据源 | 说明 |
+|--------|:----:|--------|------|
+| 期货基差 | 3 | Sina futures | CSI300/SSE50/CSI500 基差率（升贴水方向+幅度） |
+| 持仓量趋势 | 2 | Sina futures | 5日持仓量变化率，含指数间共识加权 |
+| 基差持仓共振 | 2 | Sina futures | 基差方向与OI趋势是否相互印证/背离 |
+
+### 量价确认 (2 signals)
+
+| 检测器 | 权重 | 数据源 | 说明 |
+|--------|:----:|--------|------|
+| 指数动量 | 2 | CSI300 日线（北向数据） | 20日收益率 + MA20偏离，趋势方向判定 |
+| 波动率区间 | 1 | CSI300 日线（北向数据） | 年化HV vs 高/低波阈值，风险偏好评估 |
+
+### 微观结构 (7 signals)
+
+| 检测器 | 权重 | 数据源 | 说明 |
+|--------|:----:|--------|------|
+| 涨跌比 | 2 | 北向流向数据 | 上涨/下跌家数比，市场广度 |
+| 指数量能趋势 | 2 | Sina spot index daily | CSI300 成交量 vs MA20，放量/缩量 + 价格方向 |
+| 成交额趋势 | 2 | 融资宏观 / CSI300替代 | 全市场成交额 vs MA20，含双源降级 |
+| 涨跌停统计 | 1 | AKShare stock_zt_pool_em | 涨跌停家数比，极端情绪检测 |
+| 主力资金流向 | 2 | AKShare stock_market_fund_flow | 超大单+大单 vs 中单+小单，主力/散户背离检测 |
+| 龙虎榜活动 | 2 | AKShare stock_lhb_detail_em | 龙虎榜净买入/卖出比，游资情绪检测 |
+| 新高新低广度 | 2 | AKShare stock_a_high_low_statistics | 20日/60日新高新低比，市场广度确认 |
+
+## 共振/背离分析 (4 patterns)
+
+| 模式 | 条件 | 信号 | 强度 |
+|------|------|------|:----:|
+| 偏多共振 | 北向流入 + 融资扩张 | 强烈看多——内外资共振做多 | 强 |
+| 偏空共振 | 北向流出 + 融资收缩 | 强烈看空——内外资共振撤离 | 强 |
+| 谨慎偏多 | 北向流入 + 融资去杠杆 | 聪明钱逆势加仓，中期见底信号 | 中 |
+| 背离危险 | 北向流出 + 融资加杠杆 | 外资撤离/散户接盘，分布特征 | 强 |
+
+## 评分体系
+
+### 五维加权综合评分
+
+```
+base = 0.35 × 北向综合 + 0.35 × 融资综合 + 0.17 × 期货综合 + 0.08 × 量价综合 + 0.05 × 微观综合
+with_resonance = base × (1 + 共振修正)    # 共振触发时 ±0.10~0.15
+score_0_100 = (with_resonance + 1) × 50    # [-1, 1] → [0, 100]
+```
+
+每维综合评分由该维度各检测器的**加权平均**（含信号衰减）计算，权重见上表。
+
+### 信号衰减
+
+每个检测器配置 `half_life_days`（半衰期）。连续触发 N 天的信号按 `2^(-N/half_life)` 衰减：
+- 新鲜信号（consecutive=1）：衰减系数 ≈ 1.0
+- 持续半衰期天数的信号：衰减系数 = 0.5
+- 防止"长期持续信号虚高"问题
+
+### 风险惩罚
+
+触发信号中看空信号比例 ≥38%（高）或 ≥28%（中）且绝对值偏高时，额外扣分（最高 10 分），将极端评分拉向中性。
+
+### 评分等级
+
+| 分数 | 等级 | 含义 |
 |------|------|------|
-| 偏多共振 | 北向流入 + 融资扩张 | 强烈看多 |
-| 偏空共振 | 北向流出 + 融资收缩 | 强烈看空 |
-| 谨慎偏多 | 北向流入 + 融资去杠杆 | 聪明钱进场 |
-| 背离危险 | 北向流出 + 融资加杠杆 | 外资撤离/散户接盘 |
+| 85-100 | A+ | 强烈看多 |
+| 75-84 | A | 看多 |
+| 65-74 | B+ | 偏多 |
+| 55-64 | B | 温和偏多 |
+| 45-54 | C | 中性 |
+| 35-44 | D | 中性偏空 |
+| 25-34 | E | 偏空 |
+| 15-24 | F | 看空 |
+| 0-14 | F- | 强烈看空 |
+
+### 风险评级
+
+4因子加权模型：看空信号比例(35%) + 看空信号强度(25%) + 共振背离风险(20%) + 融资买入热度(20%) → ★1-5 星
 
 ## 输出
 
-### 日报 (7 部分)
-1. 北向资金概览
-2. 融资融券概览
-3. 共振/背离分析
-4. 综合情绪评估 (0-100 评分)
-5. 板块资金流向
-6. 风险提示
-7. 数据溯源
+### 日报结构 (12 节)
+
+1. **北向资金概览** — 信号表格（含数据源标签）+ 数据摘要
+2. **融资融券概览** — 信号表格 + 宏观数据 + 个股 TOP10
+3. **股指期货信号** — 基差/持仓信号 + 各指数摘要
+4. **共振/背离分析** — 跨资产模式识别
+5. **量价确认** — 指数动量 + 波动率区间
+6. **微观结构信号** — 市场广度/量能/涨跌停/主力资金
+7. **综合情绪评估** — 5维分项得分 + 总分 + 风险惩罚
+8. **历史对比** — 与上一交易日逐项对比
+9. **AI 宏观研判** — LLM 或规则引擎综合分析
+10. **板块资金流向** — 行业融资暴露 Z-score 排名
+11. **综合风险评估** — 4因子分解 + 风险信号清单
+12. **数据溯源** — 每一类数据的来源 + 状态（✅/⚠️）
+
+每个信号表格包含 **数据源标签** 列：📡北向直 / 📊市值差 / 📈CSI300 / 📋流累积 / 🏢Panda / 🌐东方财富 / 🌐新浪 / 🌐AK实时
 
 ### 文件路径
+
 ```
 output/YYYY-MM-DD/
   panorama_monitor_YYYYMMDD.md
   panorama_monitor_YYYYMMDD.json
+
+cache/
+  YYYYMMDD/                  # 每日缓存
+  nb_flow_history.parquet    # 北向流向累积历史
+  sw_industry_mapping.parquet # 申万行业分类缓存（30天）
+  shenwan_backup.parquet     # 申万离线备份（永不过期）
+```
+
+## LLM 宏观研判
+
+支持 Anthropic Claude 和 DeepSeek（通过 Anthropic 兼容端点）。特性：
+- **指数退避重试**：针对 RateLimitError / APIConnectionError / InternalServerError / APITimeoutError，最多 3 次（间隔 2s→4s→8s）
+- **超时配置**：120s 可配，HTTP 级别重试 2 次
+- **规则引擎备选**：无 API Key 或 API 全部失败时，自动使用含精确指标提取的规则引擎生成分析
+- **DeepSeek 兼容**：自动处理 `resp.content=None` 和 thinking block 跳过
+
+```bash
+# 使用 DeepSeek
+export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+export ANTHROPIC_MODEL=deepseek-v4-pro
+export ANTHROPIC_AUTH_TOKEN=your-deepseek-token
+
+# 使用 Claude
+export ANTHROPIC_API_KEY=sk-ant-xxx
+export ANTHROPIC_MODEL=claude-sonnet-4-6
 ```
 
 ## 配置
 
-编辑 `config.json` 调整阈值：
+编辑 `config.json` 调整所有阈值和权重：
 
 ```json
 {
@@ -121,36 +262,122 @@ output/YYYY-MM-DD/
     "buy_ratio_hot": 0.10,
     "buy_ratio_dangerous": 0.15,
     "trend_short_window": 5,
-    "trend_long_window": 20
+    "trend_long_window": 20,
+    "short_change_days": 5,
+    "extreme_percentile": 95,
+    "ice_point_percentile": 5,
+    "extreme_regime_min_history": 60
+  },
+  "futures": {
+    "basis_threshold": 0.3,
+    "oi_change_threshold": 2.0
+  },
+  "microstructure": {
+    "main_fund_flow_threshold_亿": 50.0
   },
   "scoring": {
-    "northbound_weight": 0.5,
-    "margin_weight": 0.5
+    "northbound_weight": 0.35,
+    "margin_weight": 0.35,
+    "futures_weight": 0.17,
+    "pv_weight": 0.08,
+    "micro_weight": 0.05
+  },
+  "llm": {
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 2048,
+    "timeout": 120.0,
+    "max_retries": 2,
+    "llm_retries": 3
   }
 }
 ```
 
+完整配置项见 `config.json`。
+
 ## 数据源说明
 
-| 数据类别 | 主源 | 备源 |
-|----------|------|------|
-| 融资融券个股 | Pandadata `get_margin()` | 东方财富 `stock_margin_detail_sse/szse` |
-| 融资融券宏观 | 东方财富 `macro_china_market_margin_sh/sz` | — |
-| 北向资金汇总 | 东方财富 `stock_hsgt_hist_em` | — |
-| 北向资金流向 | 东方财富 `stock_hsgt_fund_flow_summary_em` | — |
-| 股票信息 | Pandadata `get_stock_detail` | — |
+| 数据类别 | 主源 | 备源 | 降级策略 |
+|----------|------|------|----------|
+| 融资融券个股 | Pandadata `get_margin()` | AKShare `stock_margin_detail_sse/szse` | 自动切换 |
+| 融资融券宏观 | AKShare `macro_china_market_margin_sh/sz` | — | — |
+| 北向资金汇总 | AKShare `stock_hsgt_hist_em` | CSI300 指数作为代理 | 4级降级链 |
+| 北向资金流向 | AKShare `stock_hsgt_fund_flow_summary_em` | — | 涨跌家数替代净买入 |
+| 北向流向历史 | FlowAccumulator 累积 | 实时重建 | 持久化 parquet |
+| 股指期货 | AKShare `futures_main_sina` + `stock_zh_index_daily` | — | — |
+| 股票信息 | Pandadata `get_stock_detail` | — | — |
+| 申万行业分类 | AKShare `stock_board_industry_name_em` | 30天缓存 → 离线备份 | 永不过期备份 |
+| HKEX 补充 | 港交所 CSV | — | best-effort |
+| 涨跌停统计 | AKShare `stock_zt_pool_em` + `stock_zt_pool_dtgc_em` | — | best-effort |
+| 主力资金流向 | AKShare `stock_market_fund_flow` | — | best-effort |
+| LLM 研判 | DeepSeek / Claude API | 规则引擎备选 | 自动降级 |
 
-**已知限制**：
-- 北向资金 `net_buy_amount` 近2周为 NaN，`market_value` 近3个月为 0（API 限制）
-- 检测器自动降级使用 CSI300 指数变动作为替代指标
-- 个股北向持仓数据不可直接获取，板块偏好基于汇总数据推算
+**已知数据限制**：
+- 北向资金 `net_buy_amount` 自 2024-08 起为 NaN（监管不披露），`market_value` 近3月为 0
+- 系统默认使用 CSI300 指数变动 + FlowAccumulator 方向累积作为替代
+- 报告中标注了每个信号的实际数据源（见"数据源标签"列）
+- 个股北向持仓明细不可直接获取，板块偏好基于汇总数据推算
 
-## 评分等级
+## 数据源标签
 
-| 分数 | 等级 | 含义 |
-|------|------|------|
-| 80-100 | A | 强烈看多 |
-| 65-79 | B | 偏多 |
-| 45-64 | C | 中性 |
-| 30-44 | D | 中性偏空 |
-| 0-29 | E-F | 看空/强烈看空 |
+每个信号的 `detail` 包含 `data_source` 字段，在报告中以图标展示：
+
+| 标签 | 含义 |
+|------|------|
+| 📡 `direct_nb` | 北向直连数据（net_buy_amount/market_value 有效） |
+| 📊 `market_value_diff` | 持股市值差分 |
+| 📈 `csi300_proxy` | CSI300 指数代理（北向数据不可用时的替代） |
+| 📋 `nb_flow_accumulated` | FlowAccumulator 方向累积 |
+| 🏢 `pandadata` | Pandadata 实时接口 |
+| 🌐 `akshare_eastmoney` | AKShare 东方财富数据 |
+| 🌐 `akshare_sina` | AKShare 新浪数据 |
+| 🌐 `akshare_realtime` | AKShare 实时数据 |
+| ❓ `unknown` | 未知来源 |
+| — `none` | 无数据 |
+
+## 高级功能
+
+### Streamlit 仪表盘
+
+```bash
+streamlit run dashboard/app.py
+```
+
+### MCP Server
+
+```bash
+python mcp_server.py           # stdio 模式
+python mcp_server.py --sse     # SSE 模式
+```
+
+### 回测框架
+
+```python
+from core.backtest import run_ic_backtest
+result = run_ic_backtest(nb_history, margin_history, min_window=60)
+# result.ic_summary, result.detector_ic_stats, result.by_regime
+```
+
+### 缓存管理
+
+```bash
+python run.py --cleanup-cache 30    # 清理 30 天前的缓存
+```
+
+### 报告校验
+
+```bash
+python scripts/validate_report.py --date 20260630
+```
+
+## 测试
+
+```bash
+# 全部 540 个测试
+python -m pytest tests/ -q
+
+# 按模块
+python -m pytest tests/test_northbound.py -q
+python -m pytest tests/test_margin.py -q
+python -m pytest tests/test_futures.py -q
+python -m pytest tests/test_scorer.py -q
+```

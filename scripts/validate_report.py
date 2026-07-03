@@ -28,11 +28,14 @@ MD_REQUIRED_SECTIONS = [
     ("margin_overview", r"^##\s+二、融资融券概览", "缺少「二、融资融券概览」章节"),
     ("futures", r"^##\s+三、股指期货信号", "缺少「三、股指期货信号」章节"),
     ("resonance", r"^##\s+四、共振/背离分析", "缺少「四、共振/背离分析」章节"),
-    ("sentiment", r"^##\s+五、综合情绪评估", "缺少「五、综合情绪评估」章节"),
-    ("ai_analysis", r"^##\s+六、AI\s+宏观研判", "缺少「六、AI 宏观研判」章节"),
-    ("sector_flow", r"^##\s+七、板块资金流向", "缺少「七、板块资金流向」章节"),
-    ("risk", r"^##\s+八、风险提示", "缺少「八、风险提示」章节"),
-    ("provenance", r"^##\s+九、数据溯源", "缺少「九、数据溯源」章节"),
+    ("price_volume", r"^##\s+五、量价确认", "缺少「五、量价确认」章节"),
+    ("microstructure", r"^##\s+六、微观结构信号", "缺少「六、微观结构信号」章节"),
+    ("sentiment", r"^##\s+七、综合情绪评估", "缺少「七、综合情绪评估」章节"),
+    ("historical", r"^##\s+八、历史对比", "缺少「八、历史对比」章节"),
+    ("ai_analysis", r"^##\s+九、AI\s+宏观研判", "缺少「九、AI 宏观研判」章节"),
+    ("sector_flow", r"^##\s+十、板块资金流向", "缺少「十、板块资金流向」章节"),
+    ("risk", r"^##\s+十一、综合风险评估", "缺少「十一、综合风险评估」章节"),
+    ("provenance", r"^##\s+十二、数据溯源", "缺少「十二、数据溯源」章节"),
 ]
 
 # Score pattern: "**综合评分**: 47/100 (C)" — parse score + grade
@@ -59,6 +62,8 @@ def validate_md(text: str) -> list[str]:
         issues.append("数据溯源缺少「融资融券明细」条目")
     if not re.search(r"股指期货\s*\|", text):
         issues.append("数据溯源缺少「股指期货」条目")
+    if not re.search(r"微观结构\s*\|", text):
+        issues.append("数据溯源缺少「微观结构」条目")
 
     # Check score appears
     if not SCORE_PATTERN.search(text):
@@ -86,6 +91,10 @@ JSON_REQUIRED_TOP_KEYS = [
     "margin",
     "futures",
     "resonance",
+    "price_volume",
+    "microstructure",
+    "risk_level",
+    "historical_comparison",
     "llm",
     "provenance",
 ]
@@ -98,7 +107,7 @@ JSON_RESONANCE_KEYS = ["patterns", "triggered_count"]
 JSON_LLM_KEYS = ["source", "analysis", "model"]
 JSON_PROVENANCE_CATEGORIES = [
     "northbound_summary", "margin_detail", "margin_macro",
-    "futures", "stock_info",
+    "futures", "stock_info", "price_volume", "microstructure", "shenwan",
 ]
 
 

@@ -219,8 +219,9 @@ class TestDetectorWeightAnalysis:
         for i in range(n):
             nb_signals_list.append(self._make_signals(
                 ["flow_trend", "single_day_anomaly", "sector_preference",
-                 "holdings_change", "cumulative_trend", "market_flow_direction"],
-                [np.random.randn() * 0.3 for _ in range(6)],
+                 "holdings_change", "cumulative_trend", "market_flow_direction",
+                 "flow_direction_trend"],
+                [np.random.randn() * 0.3 for _ in range(7)],
             ))
             margin_signals_list.append(self._make_signals(
                 ["margin_balance_trend", "margin_buy_ratio", "short_trend",
@@ -236,7 +237,7 @@ class TestDetectorWeightAnalysis:
         results = analyse_detector_weights(
             nb_signals_list, margin_signals_list, futures_signals_list, returns,
         )
-        assert len(results) == 15  # 6 NB + 6 margin + 3 futures
+        assert len(results) == 17  # 7 NB + 7 margin + 3 futures
         assert all(isinstance(r, DetectorICResult) for r in results)
 
     def test_each_result_has_required_fields(self):
