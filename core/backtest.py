@@ -544,6 +544,168 @@ def analyse_detector_weights(
     return results
 
 
+# ------------------------------------------------------------------
+# Score calibration: map score buckets to out-of-sample returns
+# ------------------------------------------------------------------
+
+
+@dataclass
+class ScoreCalibration:
+    """Maps composite score ranges to historical forward return distributions.
+
+    This answers: "When the system said 40/D in the past, what actually
+    happened to the market over the next N days?"
+    """
+    score_buckets: list[str]          # e.g. ["A+", "A", "B+", ...]
+    bucket_ranges: list[str]          # e.g. ["85-100", "75-84", ...]
+    mean_fwd_ret_1d: list[float]      # average 1-day forward return
+    mean_fwd_ret_5d: list[float]      # average 5-day forward return
+    mean_fwd_ret_20d: list[float]     # average 20-day forward return
+    hit_rate_1d: list[float]          # fraction where return direction matches score direction
+    hit_rate_5d: list[float]
+    hit_rate_20d: list[float]
+    n_observations: list[int]         # number of observations per bucket
+    total_periods: int
+    summary: str
+
+
+# Bucket definitions (score range → grade → label)
+SCORE_BUCKETS = [
+    (85, 100, "A+", "强烈看多"),
+    (75, 84, "A", "看多"),
+    (65, 74, "B+", "偏多"),
+    (55, 64, "B", "温和偏多"),
+    (45, 54, "C", "中性"),
+    (35, 44, "D", "中性偏空"),
+    (25, 34, "E", "偏空"),
+    (15, 24, "F", "看空"),
+    (0, 14, "F-", "强烈看空"),
+]
+
+
+def calibrate_score_to_returns(
+    scores: list[float],
+    fwd_returns_1d: list[float],
+    fwd_returns_5d: list[float] | None = None,
+    fwd_returns_20d: list[float] | None = None,
+) -> ScoreCalibration:
+    """Compute historical forward return distributions per score bucket.
+
+    Args:
+        scores: Composite scores (0-100) for each period.
+        fwd_returns_1d: 1-day forward returns (decimal, e.g. 0.005 = 0.5%).
+        fwd_returns_5d: 5-day forward returns (optional).
+        fwd_returns_20d: 20-day forward returns (optional).
+
+    Returns:
+        ScoreCalibration with per-bucket statistics.
+    """
+    n = len(scores)
+    if n < 20:
+        return ScoreCalibration(
+            score_buckets=[], bucket_ranges=[], mean_fwd_ret_1d=[],
+            mean_fwd_ret_5d=[], mean_fwd_ret_20d=[],
+            hit_rate_1d=[], hit_rate_5d=[], hit_rate_20d=[],
+            n_observations=[], total_periods=n,
+            summary="数据不足（需要至少20个评估周期）",
+        )
+
+    fwd_5d = list(fwd_returns_5d) if fwd_returns_5d else [0.0] * n
+    fwd_20d = list(fwd_returns_20d) if fwd_returns_20d else [0.0] * n
+
+    bucket_labels: list[str] = []
+    bucket_ranges: list[str] = []
+    mean_1d: list[float] = []
+    mean_5d: list[float] = []
+    mean_20d: list[float] = []
+    hr_1d: list[float] = []
+    hr_5d: list[float] = []
+    hr_20d: list[float] = []
+    nobs: list[int] = []
+
+    for lo, hi, grade, label in SCORE_BUCKETS:
+        indices = [i for i, s in enumerate(scores) if lo <= s <= hi]
+        if len(indices) < 3:
+            continue
+
+        rets_1d = [fwd_returns_1d[i] for i in indices if not np.isnan(fwd_returns_1d[i])]
+        rets_5 = [fwd_5d[i] for i in indices if not np.isnan(fwd_5d[i])]
+        rets_20 = [fwd_20d[i] for i in indices if not np.isnan(fwd_20d[i])]
+
+        bucket_labels.append(f"{grade} ({label})")
+        bucket_ranges.append(f"{lo}-{hi}")
+        mean_1d.append(round(float(np.mean(rets_1d)) * 100, 2) if rets_1d else 0.0)
+        mean_5d.append(round(float(np.mean(rets_5)) * 100, 2) if rets_5 else 0.0)
+        mean_20d.append(round(float(np.mean(rets_20)) * 100, 2) if rets_20 else 0.0)
+
+        # Hit rate: does the return direction match the score direction?
+        # For scores > 50, expect positive return; for < 50, expect negative
+        expected_dir = 1 if lo >= 50 else (-1 if hi <= 50 else 0)
+        if expected_dir != 0 and rets_1d:
+            hr_1d.append(round(sum(1 for r in rets_1d if r * expected_dir > 0) / len(rets_1d), 2))
+        else:
+            hr_1d.append(0.0)
+        if expected_dir != 0 and rets_5:
+            hr_5d.append(round(sum(1 for r in rets_5 if r * expected_dir > 0) / len(rets_5), 2))
+        else:
+            hr_5d.append(0.0)
+        if expected_dir != 0 and rets_20:
+            hr_20d.append(round(sum(1 for r in rets_20 if r * expected_dir > 0) / len(rets_20), 2))
+        else:
+            hr_20d.append(0.0)
+
+        nobs.append(len(rets_1d))
+
+    # Build summary
+    if bucket_labels:
+        # Find the bucket with the best 5d return
+        best_idx = int(np.argmax(mean_5d)) if mean_5d else 0
+        worst_idx = int(np.argmin(mean_5d)) if mean_5d else 0
+        summary = (
+            f"评分校准（{n}个周期）：\n"
+            f"最佳分档: {bucket_labels[best_idx]} → 平均5日收益 {mean_5d[best_idx]:+.2f}%\n"
+            f"最差分档: {bucket_labels[worst_idx]} → 平均5日收益 {mean_5d[worst_idx]:+.2f}%\n"
+            f"覆盖分档: {len(bucket_labels)}/{len(SCORE_BUCKETS)}"
+        )
+    else:
+        summary = "无足够数据填充评分分档"
+
+    return ScoreCalibration(
+        score_buckets=bucket_labels,
+        bucket_ranges=bucket_ranges,
+        mean_fwd_ret_1d=mean_1d,
+        mean_fwd_ret_5d=mean_5d,
+        mean_fwd_ret_20d=mean_20d,
+        hit_rate_1d=hr_1d,
+        hit_rate_5d=hr_5d,
+        hit_rate_20d=hr_20d,
+        n_observations=nobs,
+        total_periods=n,
+        summary=summary,
+    )
+
+
+def calibration_summary_table(cal: ScoreCalibration) -> str:
+    """Render a Markdown table for score calibration results."""
+    if not cal.score_buckets:
+        return f"（{cal.summary}）"
+
+    lines = [
+        "| 评分等级 | 分数区间 | N | 1日收益均值 | 5日收益均值 | 20日收益均值 | 1日胜率 | 5日胜率 | 20日胜率 |",
+        "|----------|----------|---|:----------:|:----------:|:-----------:|:------:|:------:|:------:|",
+    ]
+    for i in range(len(cal.score_buckets)):
+        lines.append(
+            f"| {cal.score_buckets[i]} | {cal.bucket_ranges[i]} | {cal.n_observations[i]} | "
+            f"{cal.mean_fwd_ret_1d[i]:+.2f}% | {cal.mean_fwd_ret_5d[i]:+.2f}% | "
+            f"{cal.mean_fwd_ret_20d[i]:+.2f}% | "
+            f"{cal.hit_rate_1d[i]:.0%} | {cal.hit_rate_5d[i]:.0%} | {cal.hit_rate_20d[i]:.0%} |"
+        )
+
+    lines.append(f"\n> {cal.summary}")
+    return "\n".join(lines)
+
+
 def detector_weight_summary_table(results: list[DetectorICResult]) -> str:
     """Render a Markdown table summarizing per-detector IC results."""
     lines = [

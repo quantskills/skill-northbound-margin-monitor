@@ -171,11 +171,11 @@ python -m pytest tests/ --cov=core --cov-report=term-missing
 | `margin.ice_point_percentile` | 5 | 极端冰点分位数 |
 | `futures.basis_threshold` | 0.3 | 基差方向阈值 |
 | `futures.oi_change_threshold` | 2.0 | 持仓量变化阈值 |
-| `scoring.northbound_weight` | 0.35 | 北向资金权重 |
-| `scoring.margin_weight` | 0.35 | 融资融券权重 |
-| `scoring.futures_weight` | 0.17 | 股指期货权重 |
+| `scoring.northbound_weight` | 0.18 | 北向资金权重（2026-07 由 0.35 重校准） |
+| `scoring.margin_weight` | 0.38 | 融资融券权重 |
+| `scoring.futures_weight` | 0.20 | 股指期货权重 |
 | `scoring.pv_weight` | 0.08 | 量价确认权重 |
-| `scoring.micro_weight` | 0.05 | 微观结构权重 |
+| `scoring.micro_weight` | 0.16 | 微观结构权重（2026-07 由 0.05 重校准） |
 | `llm.timeout` | 120.0 | LLM API 超时(秒) |
 | `llm.max_retries` | 2 | HTTP 级别重试 |
 | `llm.llm_retries` | 3 | 指数退避 LLM 重试 |

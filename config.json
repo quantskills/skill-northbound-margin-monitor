@@ -75,11 +75,12 @@
     "nh_nl_bearish_ratio": 0.65
   },
   "scoring": {
-    "northbound_weight": 0.35,
-    "margin_weight": 0.35,
-    "futures_weight": 0.17,
+    "_comment_nb_recalibration": "2026-07: NB weight reduced from 0.35→0.18 after net_buy_amount permanent cancellation. 4/7 NB detectors degraded to CSI300 proxy. Redistributed to margin (+3pp), futures (+3pp), microstructure (+11pp). See SKILL.md §scoring for rationale.",
+    "northbound_weight": 0.18,
+    "margin_weight": 0.38,
+    "futures_weight": 0.20,
     "price_volume_weight": 0.08,
-    "microstructure_weight": 0.05,
+    "microstructure_weight": 0.16,
     "nb_quality_threshold": 0.5,
     "nb_quality_decay": 0.6,
     "risk_overheat_threshold": 0.7,

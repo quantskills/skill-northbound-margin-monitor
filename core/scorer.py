@@ -175,7 +175,12 @@ def compute_capital_flow_score(
     # Assign grade
     grade, label = _assign_grade(score_0_100)
 
-    # Build summary
+    # Build summary with actionable suggestions (v2.3)
+    suggestions = _generate_suggestions(
+        score_0_100, grade, nb_composite, margin_composite,
+        futures_composite, micro_composite,
+    )
+
     if score_0_100 >= 70:
         summary = f"资金面{label}（{score_0_100:.0f}分），北向+融资双多，做多信号强烈"
     elif score_0_100 >= 55:
@@ -186,6 +191,10 @@ def compute_capital_flow_score(
         summary = f"资金面{label}（{score_0_100:.0f}分），整体偏空，注意风险控制"
     else:
         summary = f"资金面{label}（{score_0_100:.0f}分），北向+融资双空，避险信号强烈"
+
+    # Append suggestions to summary
+    if suggestions:
+        summary += "\n" + suggestions
 
     return CompositeScore(
         score=score_0_100,
@@ -222,6 +231,82 @@ def _assign_grade(score: float) -> tuple[str, str]:
         return "F", "悲观"
     else:
         return "F-", "极度悲观"
+
+
+def _generate_suggestions(
+    score: float,
+    grade: str,
+    nb_composite: float,
+    margin_composite: float,
+    futures_composite: float,
+    micro_composite: float,
+) -> str:
+    """Generate actionable observation points based on the composite score.
+
+    These are NOT investment recommendations — they are systematic
+    observations about what the score configuration implies for
+    portfolio monitoring. All suggestions use cautious language
+    ("可关注", "可考虑", "建议观察") and never prescribe specific trades.
+    """
+    points: list[str] = []
+
+    # ── Score-driven observations ──
+    if grade in ("A+", "A"):
+        points.append(
+            "• 资金面信号偏强，可关注指数ETF或蓝筹股的跟踪机会；"
+            "建议结合基本面确认趋势持续性"
+        )
+    elif grade == "B+":
+        points.append(
+            "• 资金面温和偏多但未形成强烈共振，可维持现有仓位观察；"
+            "等待北向+融资方向一致后再评估加仓"
+        )
+    elif grade in ("B", "C"):
+        points.append(
+            "• 多空交织，方向不明确——建议控制仓位、减少频繁操作；"
+            "可关注结构性机会（行业中性排名靠前的板块）"
+        )
+    elif grade in ("D", "E"):
+        points.append(
+            "• 资金面偏空，建议降低风险暴露、检查持仓集中度；"
+            "可关注对冲工具（如股指期货空头、反向ETF）的机会"
+        )
+    elif grade in ("F", "F-"):
+        points.append(
+            "• 资金面极度偏空，系统性风险上升——建议大幅降低仓位或空仓观望；"
+            "关注融资去杠杆进程是否加速"
+        )
+
+    # ── Dimension-specific observations ──
+    if nb_composite < -0.3:
+        points.append(
+            "• 北向信号偏空（使用CSI300代理，注意信号质量有限），"
+            "外资流向趋势偏谨慎"
+        )
+    if margin_composite > 0.4:
+        points.append(
+            "• 融资信号过热——杠杆率处于历史高位，需警惕去杠杆引发的"
+            "负反馈风险"
+        )
+    if margin_composite < -0.3:
+        points.append(
+            "• 融资信号偏冷——杠杆资金持续收缩，市场风险偏好低迷"
+        )
+    if futures_composite < -0.2:
+        points.append(
+            "• 期货基差偏空——期指贴水扩大，对冲成本和套保需求上升"
+        )
+    if micro_composite > 0.4:
+        points.append(
+            "• 微观结构信号转暖——龙虎榜活跃/涨跌比扩大/主力资金流入，"
+            "短期情绪边际改善"
+        )
+    if micro_composite < -0.3:
+        points.append(
+            "• 微观结构信号偏冷——市场广度收窄/主力资金流出/新高新低比恶化"
+        )
+
+    return "\n".join(points) if points else ""
 
 
 # ------------------------------------------------------------------
