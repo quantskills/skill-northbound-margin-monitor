@@ -54,8 +54,10 @@ quantSkills:
   status: dev
   validation_level: runnable
   maintainer_type: community
-  summary_zh: 每日A股资金面全景监控：25信号检测器（北向7+融资7+期货3+量价2+微观结构7），4共振/背离模式，五维加权0-100评分，LLM宏观研判，Markdown/JSON双格式日报。北向数据退化后权重已自动重校准（北向35%→18%）。
-  summary_en: Daily A-share capital flow panorama: 25 signal detectors x 5 dimensions, 4 resonance patterns, 0-100 composite score with risk penalty, LLM macro analysis. NB weight auto-recalibrated after net_buy_amount cancellation.
+  summary_zh: >-
+    每日A股资金面全景监控：25信号检测器（北向7+融资7+期货3+量价2+微观结构7），4共振/背离模式，五维加权0-100评分，LLM宏观研判，Markdown/JSON双格式日报。北向数据退化后权重已自动重校准（北向35%→18%）。
+  summary_en: >-
+    Daily A-share capital flow panorama: 25 signal detectors x 5 dimensions, 4 resonance patterns, 0-100 composite score with risk penalty, LLM macro analysis. NB weight auto-recalibrated after net_buy_amount cancellation.
 ---
 
 # 北向资金 + 融资融券 + 股指期货全景监控
