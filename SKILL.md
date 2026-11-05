@@ -25,7 +25,7 @@ output_formats:
   - json结构化数据
   - streamlit仪表盘
 schedule: 每日收盘后 15:45 Asia/Shanghai（盘后固定价格交易 15:05-15:30 结束后执行）
-license: GPLv3
+license: GPL-3.0-only
 metadata:
   organization: QuantSkills
   organization_url: https://github.com/quantskills
@@ -515,3 +515,7 @@ skill-northbound-margin-monitor/
         ├── panorama_monitor_YYYYMMDD.md
         └── panorama_monitor_YYYYMMDD.json
 ```
+
+## Pandadata compatibility
+
+[Pandadata 1.0.6 compatibility](references/pandadata-compatibility.md) — exact SDK baseline, validation scope, and shared guidance for all supported agent runtimes.

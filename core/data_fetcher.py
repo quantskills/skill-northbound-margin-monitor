@@ -118,7 +118,7 @@ class DataFetcher:
             import panda_data as pdd
         except ImportError:
             raise RuntimeError(
-                "panda_data SDK not installed. Install with: pip install panda_data>=0.0.9"
+                "panda_data SDK not installed. Install with: pip install panda_data==1.0.6"
             )
 
         pd_cfg = self._config.get("pandadata", {})

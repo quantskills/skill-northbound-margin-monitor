@@ -40,7 +40,7 @@ cp .env.example .env
 ### 依赖
 
 - Python >= 3.10
-- panda_data >= 0.0.9 (融资融券数据)
+- panda_data==1.0.6 (融资融券数据)
 - akshare >= 1.18.0 (北向/期货/涨跌停数据)
 - anthropic >= 0.39.0 (LLM API)
 - tenacity >= 8.0 (LLM 重试)
@@ -201,3 +201,6 @@ python -m pytest tests/ --cov=core --cov-report=term-missing
 ## License
 
 GPLv3
+
+
+Pandadata 兼容维护：[abgyjaguo](https://github.com/abgyjaguo)，保留原项目作者署名。
