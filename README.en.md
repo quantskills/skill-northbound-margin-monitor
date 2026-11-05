@@ -41,7 +41,7 @@ cp .env.example .env
 ### Dependencies
 
 - Python >= 3.10
-- panda_data >= 0.0.9 (margin trading data)
+- panda_data==1.0.6 (margin trading data)
 - akshare >= 1.18.0 (northbound/futures/limit data)
 - anthropic >= 0.39.0 (LLM API)
 - tenacity >= 8.0 (LLM retry)
@@ -209,3 +209,6 @@ python -m pytest tests/ --cov=core --cov-report=term-missing
 ## License
 
 GPLv3
+
+
+Pandadata compatibility maintenance: [abgyjaguo](https://github.com/abgyjaguo). Existing authorship is retained.

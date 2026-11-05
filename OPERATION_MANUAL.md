@@ -56,7 +56,7 @@ export ANTHROPIC_MODEL=claude-sonnet-4-6
 
 ```bash
 pip install -r requirements.txt
-# panda_data >= 0.0.9
+# panda_data==1.0.6
 # akshare >= 1.18.0
 # anthropic >= 0.39.0
 # tenacity >= 8.0
